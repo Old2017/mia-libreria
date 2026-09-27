@@ -1,6 +1,7 @@
 'use client';
 
 import React, {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -29,17 +30,25 @@ import {
   GripVertical,
   Layers,
   Sparkles,
+  Camera,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
+
+import * as XLSX from 'xlsx';
+
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 import {
   BrowserMultiFormatReader,
 } from '@zxing/browser';
 
-import * as XLSX from 'xlsx';
+import {
+  BarcodeFormat,
+  DecodeHintType,
+} from '@zxing/library';
 
-import jsPDF from 'jspdf';
-
-import autoTable from 'jspdf-autotable';
 
 /* =========================================================
    TIPI
@@ -49,25 +58,43 @@ export interface BookItem {
   id: string;
   title: string;
   author: string;
+
   publishCountry?: string;
   coverUrl?: string;
   publisher?: string;
   publishYear?: string;
   pages?: number;
+
   genre?: string;
   seriesTag?: string;
   volume?: string;
+
   isClassic?: boolean;
-  format: 'cartaceo' | 'ebook' | 'ebook_and_paper';
+
+  format:
+    | 'cartaceo'
+    | 'ebook'
+    | 'ebook_and_paper';
+
   isRead: boolean;
+
   readMonth?: string;
   readYear?: number;
   readMonthYear?: string;
+
   rating?: number;
+
   notes?: string;
+
   isbn?: string;
+
   createdAt: number;
 }
+
+
+/* =========================================================
+   COSTANTI
+========================================================= */
 
 const MONTHS = [
   'Gennaio',
@@ -86,64 +113,52 @@ const MONTHS = [
 
 const STORAGE_KEY = 'ios_library_books_v6';
 
+
 /* =========================================================
-   UTILS
+   UTILITY ISBN
 ========================================================= */
 
-/**
- * Normalizza un codice letto dalla fotocamera.
- *
- * Accettiamo:
- * - ISBN-13 978...
- * - ISBN-13 979...
- * - ISBN-10
- *
- * Un EAN-13 non ISBN viene ignorato.
- */
-const normalizeISBN = (value: string): string | null => {
-  const cleaned = value
-    .trim()
-    .replace(/[^0-9Xx]/g, '');
+function cleanISBN(value: string) {
+  return value
+    .replace(/[^0-9Xx]/g, '')
+    .toUpperCase();
+}
 
-  if (
-    cleaned.length === 13 &&
-    (cleaned.startsWith('978') || cleaned.startsWith('979'))
-  ) {
-    return cleaned;
-  }
+function isValidISBN(value: string) {
+  const isbn = cleanISBN(value);
 
-  if (cleaned.length === 10) {
-    return cleaned.toUpperCase();
-  }
+  return isbn.length === 10 || isbn.length === 13;
+}
 
-  return null;
-};
 
 /* =========================================================
-   COMPONENTE
+   COMPONENTE PRINCIPALE
 ========================================================= */
 
 export default function LibraryApp() {
-  /* -------------------------------------------------------
+  const currentYearNum = new Date().getFullYear();
+
+  /* =======================================================
      NAVIGAZIONE
-  ------------------------------------------------------- */
+  ======================================================= */
 
   const [activeTab, setActiveTab] = useState<
     'home' | 'read' | 'authors' | 'settings'
   >('home');
 
-  /* -------------------------------------------------------
+  /* =======================================================
      LIBRI
-  ------------------------------------------------------- */
+  ======================================================= */
 
   const [books, setBooks] = useState<BookItem[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  /* -------------------------------------------------------
+  /* =======================================================
      MODALI
-  ------------------------------------------------------- */
+  ======================================================= */
 
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isAddModalOpen, setIsAddModalOpen] =
+    useState(false);
 
   const [selectedBookDetail, setSelectedBookDetail] =
     useState<BookItem | null>(null);
@@ -151,90 +166,15 @@ export default function LibraryApp() {
   const [selectedAuthor, setSelectedAuthor] =
     useState<string | null>(null);
 
-  const [homeSubView, setHomeSubView] = useState<
-    'none' | 'classics' | 'genres'
-  >('none');
+  const [homeSubView, setHomeSubView] =
+    useState<'none' | 'classics' | 'genres'>('none');
 
   const [selectedGenreHome, setSelectedGenreHome] =
     useState<string | null>(null);
 
-  /* -------------------------------------------------------
-     DRAG & DROP
-  ------------------------------------------------------- */
-
-  const [draggedIndex, setDraggedIndex] =
-    useState<number | null>(null);
-
-  /* -------------------------------------------------------
-     ISBN
-  ------------------------------------------------------- */
-
-  const [isbnInput, setIsbnInput] = useState('');
-  const [isSearchingIsbn, setIsSearchingIsbn] = useState(false);
-
-  /* -------------------------------------------------------
-     SCANNER
-  ------------------------------------------------------- */
-
-  const [isScannerOpen, setIsScannerOpen] =
-    useState(false);
-
-  const [isScanning, setIsScanning] =
-    useState(false);
-
-  const [scannerError, setScannerError] =
-    useState('');
-
-  const videoRef =
-    useRef<HTMLVideoElement | null>(null);
-
-  const scannerControlsRef =
-    useRef<{ stop: () => void } | null>(null);
-
-  const codeReaderRef =
-    useRef<BrowserMultiFormatReader | null>(null);
-
-  const scannerResultHandledRef =
-    useRef(false);
-
-  /* -------------------------------------------------------
-     FILTRI
-  ------------------------------------------------------- */
-
-  const [filterGenre, setFilterGenre] =
-    useState('all');
-
-  const [filterFormat, setFilterFormat] =
-    useState('all');
-
-  const [filterYear, setFilterYear] =
-    useState('all');
-
-  const [searchQuery, setSearchQuery] =
-    useState('');
-
-  /* -------------------------------------------------------
-     ANNI
-  ------------------------------------------------------- */
-
-  const currentYearNum =
-    new Date().getFullYear();
-
-  const startYear = 2023;
-
-  const yearsList = Array.from(
-    {
-      length: Math.max(
-        1,
-        currentYearNum - startYear + 1
-      ),
-    },
-    (_, i) => currentYearNum - i
-  );
-
-  /* -------------------------------------------------------
+  /* =======================================================
      FORM
-  ------------------------------------------------------- */
+  ======================================================= */
 
   const [formData, setFormData] =
     useState<Partial<BookItem>>({
@@ -258,9 +198,85 @@ export default function LibraryApp() {
       isbn: '',
     });
 
-  /* =========================================================
-     STORAGE
-  ========================================================= */
+  /* =======================================================
+     ISBN
+  ======================================================= */
+
+  const [isbnInput, setIsbnInput] =
+    useState('');
+
+  const [isSearchingIsbn, setIsSearchingIsbn] =
+    useState(false);
+
+  /* =======================================================
+     SCANNER
+  ======================================================= */
+
+  const [isScannerOpen, setIsScannerOpen] =
+    useState(false);
+
+  const [scannerStatus, setScannerStatus] =
+    useState('Inquadra il codice ISBN del libro');
+
+  const [scannerError, setScannerError] =
+    useState('');
+
+  const scannerVideoRef =
+    useRef<HTMLVideoElement | null>(null);
+
+  const scannerControlsRef =
+    useRef<{ stop: () => void } | null>(null);
+
+  const scannerReaderRef =
+    useRef<BrowserMultiFormatReader | null>(null);
+
+  const scannerLockedRef =
+    useRef(false);
+
+  /* =======================================================
+     DRAG
+  ======================================================= */
+
+  const [draggedIndex, setDraggedIndex] =
+    useState<number | null>(null);
+
+  /* =======================================================
+     FILTRI
+  ======================================================= */
+
+  const [filterGenre, setFilterGenre] =
+    useState('all');
+
+  const [filterFormat, setFilterFormat] =
+    useState('all');
+
+  const [filterYear, setFilterYear] =
+    useState('all');
+
+  const [searchQuery, setSearchQuery] =
+    useState('');
+
+
+  /* =======================================================
+     ANNI
+  ======================================================= */
+
+  const startYear = 2023;
+
+  const yearsList = Array.from(
+    {
+      length: Math.max(
+        1,
+        currentYearNum - startYear + 1
+      ),
+    },
+    (_, i) => currentYearNum - i
+  );
+
+
+  /* =======================================================
+     CARICAMENTO
+  ======================================================= */
 
   useEffect(() => {
     try {
@@ -279,10 +295,15 @@ export default function LibraryApp() {
         'Errore caricamento biblioteca:',
         error
       );
-    } finally {
-      setIsLoaded(true);
     }
+
+    setIsLoaded(true);
   }, []);
+
+
+  /* =======================================================
+     SALVATAGGIO
+  ======================================================= */
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -300,433 +321,12 @@ export default function LibraryApp() {
     }
   }, [books, isLoaded]);
 
-  /* =========================================================
-     CLEANUP SCANNER
-  ========================================================= */
 
-  useEffect(() => {
-    return () => {
-      try {
-        scannerControlsRef.current?.stop();
-      } catch (error) {
-        console.warn(
-          'Errore stop scanner:',
-          error
-        );
-      }
+  /* =======================================================
+     RESET FORM
+  ======================================================= */
 
-      scannerControlsRef.current = null;
-
-      if (videoRef.current) {
-        const stream =
-          videoRef.current.srcObject as MediaStream | null;
-
-        if (stream) {
-          stream
-            .getTracks()
-            .forEach((track) => track.stop());
-        }
-
-        videoRef.current.srcObject = null;
-      }
-
-      codeReaderRef.current = null;
-    };
-  }, []);
-
-  /* =========================================================
-     STATISTICHE
-  ========================================================= */
-
-  const totalBooks = books.length;
-
-  const totalCartacei = books.filter(
-    (b) =>
-      b.format === 'cartaceo' ||
-      b.format === 'ebook_and_paper'
-  ).length;
-
-  const totalEbook = books.filter(
-    (b) =>
-      b.format === 'ebook' ||
-      b.format === 'ebook_and_paper'
-  ).length;
-
-  const readBooks = books.filter(
-    (b) => b.isRead
-  );
-
-  const readBooksCount =
-    readBooks.length;
-
-  const readCartacei = readBooks.filter(
-    (b) =>
-      b.format === 'cartaceo' ||
-      b.format === 'ebook_and_paper'
-  ).length;
-
-  const readEbook = readBooks.filter(
-    (b) =>
-      b.format === 'ebook' ||
-      b.format === 'ebook_and_paper'
-  ).length;
-
-  const readThisYearBooks =
-    books.filter((b) => {
-      if (!b.isRead) return false;
-
-      if (b.readYear) {
-        return (
-          b.readYear === currentYearNum
-        );
-      }
-
-      if (
-        b.readMonthYear &&
-        b.readMonthYear.includes(
-          currentYearNum.toString()
-        )
-      ) {
-        return true;
-      }
-
-      return false;
-    });
-
-  const readThisYearCount =
-    readThisYearBooks.length;
-
-  const readThisYearCartacei =
-    readThisYearBooks.filter(
-      (b) =>
-        b.format === 'cartaceo' ||
-        b.format === 'ebook_and_paper'
-    ).length;
-
-  const readThisYearEbook =
-    readThisYearBooks.filter(
-      (b) =>
-        b.format === 'ebook' ||
-        b.format === 'ebook_and_paper'
-    ).length;
-
-  /* =========================================================
-     GOOGLE BOOKS
-  ========================================================= */
-
-  const handleSearchBookByISBN = async (
-    codeToSearch?: string
-  ) => {
-    const rawQuery =
-      codeToSearch || isbnInput;
-
-    const query =
-      normalizeISBN(rawQuery);
-
-    if (!query) {
-      alert(
-        'Inserisci un ISBN-10 o ISBN-13 valido.'
-      );
-      return;
-    }
-
-    setIsbnInput(query);
-    setIsSearchingIsbn(true);
-
-    try {
-      const res = await fetch(
-        `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(
-          query
-        )}`
-      );
-
-      if (!res.ok) {
-        throw new Error(
-          `Google Books HTTP ${res.status}`
-        );
-      }
-
-      const data = await res.json();
-
-      if (
-        data.items &&
-        data.items.length > 0
-      ) {
-        const info =
-          data.items[0].volumeInfo;
-
-        const cover =
-          info.imageLinks?.thumbnail
-            ?.replace(/^http:/, 'https:') ||
-          info.imageLinks?.smallThumbnail
-            ?.replace(/^http:/, 'https:') ||
-          '';
-
-        setFormData((prev) => ({
-          ...prev,
-
-          title:
-            info.title ||
-            prev.title ||
-            '',
-
-          author: info.authors
-            ? info.authors.join(', ')
-            : prev.author || '',
-
-          publisher:
-            info.publisher ||
-            prev.publisher ||
-            '',
-
-          publishYear:
-            info.publishedDate
-              ? info.publishedDate.substring(
-                  0,
-                  4
-                )
-              : prev.publishYear || '',
-
-          pages:
-            info.pageCount ||
-            prev.pages ||
-            undefined,
-
-          genre:
-            info.categories?.[0] ||
-            prev.genre ||
-            '',
-
-          coverUrl:
-            cover ||
-            prev.coverUrl ||
-            '',
-
-          isbn: query,
-        }));
-
-        setIsbnInput(query);
-      } else {
-        alert(
-          'Nessun libro trovato per questo ISBN. Puoi compilare i dati manualmente.'
-        );
-      }
-    } catch (error) {
-      console.error(
-        'Errore Google Books:',
-        error
-      );
-
-      alert(
-        'Errore durante la ricerca del libro. Controlla la connessione e riprova.'
-      );
-    } finally {
-      setIsSearchingIsbn(false);
-    }
-  };
-
-  /* =========================================================
-     CHIUDI SCANNER
-  ========================================================= */
-
-  const closeBarcodeScanner = () => {
-    try {
-      scannerControlsRef.current?.stop();
-    } catch (error) {
-      console.warn(
-        'Errore durante lo stop dello scanner:',
-        error
-      );
-    }
-
-    scannerControlsRef.current = null;
-
-    if (videoRef.current) {
-      const stream =
-        videoRef.current.srcObject as MediaStream | null;
-
-      if (stream) {
-        stream
-          .getTracks()
-          .forEach((track) => track.stop());
-      }
-
-      videoRef.current.srcObject = null;
-    }
-
-    codeReaderRef.current = null;
-
-    scannerResultHandledRef.current =
-      false;
-
-    setIsScanning(false);
-    setIsScannerOpen(false);
-    setScannerError('');
-  };
-
-  /* =========================================================
-     APRI SCANNER
-  ========================================================= */
-
-  const openBarcodeScanner = async () => {
-    setScannerError('');
-    setIsScannerOpen(true);
-    setIsScanning(false);
-
-    scannerResultHandledRef.current =
-      false;
-
-    /*
-     * Aspettiamo un tick perché il <video>
-     * deve essere presente nel DOM.
-     */
-    await new Promise<void>((resolve) => {
-      window.setTimeout(
-        resolve,
-        100
-      );
-    });
-
-    try {
-      if (
-        !navigator.mediaDevices ||
-        !navigator.mediaDevices.getUserMedia
-      ) {
-        throw new Error(
-          'La fotocamera non è disponibile in questo browser.'
-        );
-      }
-
-      if (!videoRef.current) {
-        throw new Error(
-          'Elemento video non disponibile.'
-        );
-      }
-
-      /*
-       * Importante:
-       * NON usiamo BarcodeDetector.
-       *
-       * NON usiamo codeReader.reset().
-       *
-       * ZXing gestisce direttamente la fotocamera.
-       */
-      const reader =
-        new BrowserMultiFormatReader();
-
-      codeReaderRef.current =
-        reader;
-
-      const controls =
-        await reader.decodeFromConstraints(
-          {
-            video: {
-              facingMode: {
-                ideal: 'environment',
-              },
-              width: {
-                ideal: 1280,
-              },
-              height: {
-                ideal: 720,
-              },
-            },
-            audio: false,
-          },
-          videoRef.current,
-          (result) => {
-            if (!result) return;
-
-            if (
-              scannerResultHandledRef.current
-            ) {
-              return;
-            }
-
-            const rawCode =
-              result.getText();
-
-            console.log(
-              'Codice rilevato:',
-              rawCode
-            );
-
-            const isbn =
-              normalizeISBN(rawCode);
-
-            /*
-             * Un EAN non compatibile con ISBN
-             * viene ignorato.
-             */
-            if (!isbn) {
-              return;
-            }
-
-            scannerResultHandledRef.current =
-              true;
-
-            setIsbnInput(isbn);
-
-            closeBarcodeScanner();
-
-            /*
-             * Piccolo ritardo per permettere
-             * alla UI di chiudere il modal.
-             */
-            window.setTimeout(() => {
-              handleSearchBookByISBN(isbn);
-            }, 100);
-          }
-        );
-
-      scannerControlsRef.current =
-        controls;
-
-      setIsScanning(true);
-    } catch (error) {
-      console.error(
-        'Errore scanner:',
-        error
-      );
-
-      setIsScanning(false);
-
-      let message =
-        'Impossibile accedere alla fotocamera.';
-
-      if (
-        error instanceof DOMException
-      ) {
-        if (
-          error.name ===
-          'NotAllowedError'
-        ) {
-          message =
-            'Safari non ha il permesso di usare la fotocamera. Vai in Impostazioni > Safari > Fotocamera e consenti l’accesso.';
-        } else if (
-          error.name ===
-          'NotFoundError'
-        ) {
-          message =
-            'Nessuna fotocamera disponibile.';
-        } else if (
-          error.name ===
-          'NotReadableError'
-        ) {
-          message =
-            'La fotocamera è già utilizzata da un’altra applicazione.';
-        }
-      }
-
-      setScannerError(message);
-    }
-  };
-
-  /* =========================================================
-     FORM
-  ========================================================= */
-
-  const resetForm = () => {
+  const resetForm = useCallback(() => {
     setFormData({
       title: '',
       author: '',
@@ -749,12 +349,447 @@ export default function LibraryApp() {
     });
 
     setIsbnInput('');
+  }, [currentYearNum]);
+
+
+  /* =======================================================
+     CERCA LIBRO VIA API NEXT.JS
+  ======================================================= */
+
+  const handleSearchBookByISBN = useCallback(
+    async (code?: string) => {
+      const raw = code ?? isbnInput;
+      const isbn = cleanISBN(raw);
+
+      if (!isbn) {
+        alert('Inserisci un codice ISBN.');
+        return;
+      }
+
+      if (!isValidISBN(isbn)) {
+        alert(
+          'Il codice inserito non sembra un ISBN valido.'
+        );
+        return;
+      }
+
+      setIsSearchingIsbn(true);
+
+      try {
+        const response = await fetch(
+          `/api/books/isbn?isbn=${encodeURIComponent(
+            isbn
+          )}`,
+          {
+            method: 'GET',
+            cache: 'no-store',
+          }
+        );
+
+        let data: any = null;
+
+        try {
+          data = await response.json();
+        } catch {
+          throw new Error(
+            'La risposta del server non è valida.'
+          );
+        }
+
+        if (!response.ok || !data?.ok) {
+          throw new Error(
+            data?.error ||
+              'Nessun libro trovato.'
+          );
+        }
+
+        const book = data.book;
+
+        setFormData((previous) => ({
+          ...previous,
+
+          isbn: book.isbn || isbn,
+
+          title:
+            book.title ||
+            previous.title ||
+            '',
+
+          author:
+            book.author ||
+            previous.author ||
+            '',
+
+          publisher:
+            book.publisher ||
+            previous.publisher ||
+            '',
+
+          publishYear:
+            book.publishYear ||
+            previous.publishYear ||
+            '',
+
+          pages:
+            book.pages ||
+            previous.pages ||
+            undefined,
+
+          genre:
+            book.genre ||
+            previous.genre ||
+            '',
+
+          coverUrl:
+            book.coverUrl ||
+            previous.coverUrl ||
+            '',
+        }));
+
+        setIsbnInput(
+          book.isbn || isbn
+        );
+
+        setScannerStatus(
+          'Libro trovato. Dati compilati automaticamente.'
+        );
+
+        return true;
+      } catch (error) {
+        console.error(
+          'Errore ricerca ISBN:',
+          error
+        );
+
+        alert(
+          error instanceof Error
+            ? error.message
+            : 'Errore durante la ricerca del libro.'
+        );
+
+        return false;
+      } finally {
+        setIsSearchingIsbn(false);
+      }
+    },
+    [isbnInput]
+  );
+
+
+  /* =======================================================
+     STOP SCANNER
+  ======================================================= */
+
+  const stopScanner = useCallback(() => {
+    try {
+      scannerControlsRef.current?.stop();
+    } catch (error) {
+      console.warn(
+        'Errore stop scanner:',
+        error
+      );
+    }
+
+    scannerControlsRef.current = null;
+
+    scannerLockedRef.current = false;
+
+    const video =
+      scannerVideoRef.current;
+
+    if (video?.srcObject) {
+      const stream =
+        video.srcObject as MediaStream;
+
+      stream
+        .getTracks()
+        .forEach((track) => track.stop());
+
+      video.srcObject = null;
+    }
+
+    scannerReaderRef.current = null;
+
+    setIsScannerOpen(false);
+  }, []);
+
+
+  /* =======================================================
+     AVVIO SCANNER
+  ======================================================= */
+
+  const startScanner = useCallback(
+    async () => {
+      setScannerError('');
+      setScannerStatus(
+        'Richiesta accesso alla fotocamera...'
+      );
+
+      scannerLockedRef.current = false;
+
+      try {
+        if (
+          typeof window === 'undefined' ||
+          !navigator.mediaDevices?.getUserMedia
+        ) {
+          throw new Error(
+            'La fotocamera non è disponibile in questo browser.'
+          );
+        }
+
+        if (!scannerVideoRef.current) {
+          throw new Error(
+            'Elemento video non disponibile.'
+          );
+        }
+
+        /*
+         * Hint per velocizzare la ricerca.
+         * I libri normalmente utilizzano EAN-13
+         * con prefisso 978/979.
+         */
+        const hints = new Map();
+
+        hints.set(
+          DecodeHintType.POSSIBLE_FORMATS,
+          [
+            BarcodeFormat.EAN_13,
+            BarcodeFormat.EAN_8,
+            BarcodeFormat.UPC_A,
+            BarcodeFormat.UPC_E,
+            BarcodeFormat.CODE_128,
+            BarcodeFormat.ITF,
+            BarcodeFormat.QR_CODE,
+          ]
+        );
+
+        hints.set(
+          DecodeHintType.TRY_HARDER,
+          true
+        );
+
+        const reader =
+          new BrowserMultiFormatReader(
+            hints
+          );
+
+        scannerReaderRef.current = reader;
+
+        const video =
+          scannerVideoRef.current;
+
+        /*
+         * Importante:
+         * NON usiamo reader.reset().
+         *
+         * La versione moderna di @zxing/browser
+         * restituisce dei controls con stop().
+         */
+        const controls =
+          await reader.decodeFromVideoDevice(
+            undefined,
+            video,
+            async (
+              result,
+              error,
+              controlsFromCallback
+            ) => {
+              if (!result) {
+                return;
+              }
+
+              if (scannerLockedRef.current) {
+                return;
+              }
+
+              scannerLockedRef.current = true;
+
+              const rawText =
+                result.getText();
+
+              const detectedISBN =
+                cleanISBN(rawText);
+
+              console.log(
+                'Codice rilevato:',
+                rawText
+              );
+
+              setScannerStatus(
+                `Codice rilevato: ${detectedISBN}`
+              );
+
+              /*
+               * Fermiamo subito la scansione.
+               */
+              try {
+                controlsFromCallback.stop();
+              } catch {}
+
+              try {
+                controls.stop();
+              } catch {}
+
+              scannerControlsRef.current =
+                null;
+
+              /*
+               * Chiudiamo il video.
+               */
+              if (video.srcObject) {
+                const stream =
+                  video.srcObject as MediaStream;
+
+                stream
+                  .getTracks()
+                  .forEach((track) =>
+                    track.stop()
+                  );
+
+                video.srcObject = null;
+              }
+
+              /*
+               * Verifichiamo che sia compatibile
+               * con un ISBN.
+               */
+              if (
+                detectedISBN.length !== 13 &&
+                detectedISBN.length !== 10
+              ) {
+                scannerLockedRef.current = false;
+
+                setScannerStatus(
+                  'Codice letto, ma non sembra un ISBN. Riprova.'
+                );
+
+                return;
+              }
+
+              setIsScannerOpen(false);
+
+              setIsbnInput(
+                detectedISBN
+              );
+
+              /*
+               * Ora cerchiamo il libro.
+               */
+              await handleSearchBookByISBN(
+                detectedISBN
+              );
+
+              scannerLockedRef.current =
+                false;
+            }
+          );
+
+        scannerControlsRef.current =
+          controls;
+
+        setScannerStatus(
+          'Inquadra il codice a barre ISBN sul retro del libro'
+        );
+      } catch (error) {
+        console.error(
+          'Errore avvio scanner:',
+          error
+        );
+
+        scannerControlsRef.current = null;
+
+        if (
+          error instanceof DOMException &&
+          error.name === 'NotAllowedError'
+        ) {
+          setScannerError(
+            'Accesso alla fotocamera negato. Vai in Impostazioni > Safari > Fotocamera e consenti l’accesso.'
+          );
+        } else if (
+          error instanceof DOMException &&
+          error.name === 'NotFoundError'
+        ) {
+          setScannerError(
+            'Nessuna fotocamera disponibile.'
+          );
+        } else {
+          setScannerError(
+            error instanceof Error
+              ? error.message
+              : 'Impossibile avviare la fotocamera.'
+          );
+        }
+      }
+    },
+    [handleSearchBookByISBN]
+  );
+
+
+  /* =======================================================
+     APRI SCANNER
+  ======================================================= */
+
+  const openScanner = () => {
+    setScannerError('');
+    setScannerStatus(
+      'Preparazione fotocamera...'
+    );
+    setIsScannerOpen(true);
   };
 
+
+  /* =======================================================
+     EFFECT SCANNER
+  ======================================================= */
+
+  useEffect(() => {
+    if (!isScannerOpen) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      startScanner();
+    }, 150);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [isScannerOpen, startScanner]);
+
+
+  /* =======================================================
+     CLEANUP
+  ======================================================= */
+
+  useEffect(() => {
+    return () => {
+      try {
+        scannerControlsRef.current?.stop();
+      } catch {}
+
+      const video =
+        scannerVideoRef.current;
+
+      if (video?.srcObject) {
+        const stream =
+          video.srcObject as MediaStream;
+
+        stream
+          .getTracks()
+          .forEach((track) => track.stop());
+      }
+    };
+  }, []);
+
+
+  /* =======================================================
+     SALVA LIBRO
+  ======================================================= */
+
   const handleSaveBook = (
-    e: React.FormEvent
+    event: React.FormEvent
   ) => {
-    e.preventDefault();
+    event.preventDefault();
 
     if (
       !formData.title?.trim() ||
@@ -838,7 +873,9 @@ export default function LibraryApp() {
         formData.notes || '',
 
       isbn:
-        formData.isbn || '',
+        cleanISBN(
+          formData.isbn || ''
+        ),
 
       createdAt:
         formData.createdAt ||
@@ -846,345 +883,210 @@ export default function LibraryApp() {
     };
 
     if (formData.id) {
-      setBooks((current) =>
-        current.map((book) =>
+      setBooks((previous) =>
+        previous.map((book) =>
           book.id === formData.id
             ? newBook
             : book
         )
       );
     } else {
-      setBooks((current) => [
+      setBooks((previous) => [
         newBook,
-        ...current,
+        ...previous,
       ]);
     }
 
     setIsAddModalOpen(false);
+
     setSelectedBookDetail(null);
 
     resetForm();
   };
 
+
+  /* =======================================================
+     MODIFICA
+  ======================================================= */
+
   const handleEditBook = (
     book: BookItem
   ) => {
-    setFormData(book);
-    setIsbnInput(book.isbn || '');
+    setFormData({
+      ...book,
+    });
+
+    setIsbnInput(
+      book.isbn || ''
+    );
+
     setSelectedBookDetail(null);
+
     setIsAddModalOpen(true);
   };
+
+
+  /* =======================================================
+     ELIMINA
+  ======================================================= */
 
   const handleDeleteBook = (
     id: string
   ) => {
     if (
-      confirm(
+      !confirm(
         'Sei sicuro di voler eliminare questo libro?'
       )
     ) {
-      setBooks((current) =>
-        current.filter(
-          (book) => book.id !== id
-        )
-      );
+      return;
+    }
 
-      if (
-        selectedBookDetail?.id === id
-      ) {
-        setSelectedBookDetail(null);
+    setBooks((previous) =>
+      previous.filter(
+        (book) => book.id !== id
+      )
+    );
+
+    if (
+      selectedBookDetail?.id === id
+    ) {
+      setSelectedBookDetail(null);
+    }
+  };
+
+
+  /* =======================================================
+     STATISTICHE
+  ======================================================= */
+
+  const totalBooks =
+    books.length;
+
+  const totalCartacei =
+    books.filter(
+      (book) =>
+        book.format === 'cartaceo' ||
+        book.format ===
+          'ebook_and_paper'
+    ).length;
+
+  const totalEbook =
+    books.filter(
+      (book) =>
+        book.format === 'ebook' ||
+        book.format ===
+          'ebook_and_paper'
+    ).length;
+
+  const readBooks =
+    books.filter(
+      (book) => book.isRead
+    );
+
+  const readBooksCount =
+    readBooks.length;
+
+  const readCartacei =
+    readBooks.filter(
+      (book) =>
+        book.format === 'cartaceo' ||
+        book.format ===
+          'ebook_and_paper'
+    ).length;
+
+  const readEbook =
+    readBooks.filter(
+      (book) =>
+        book.format === 'ebook' ||
+        book.format ===
+          'ebook_and_paper'
+    ).length;
+
+  const readThisYearBooks =
+    books.filter((book) => {
+      if (!book.isRead) {
+        return false;
       }
-    }
-  };
 
-  /* =========================================================
-     DRAG & DROP
-  ========================================================= */
-
-  const handleDragStart = (
-    index: number
-  ) => {
-    setDraggedIndex(index);
-  };
-
-  const handleDragOver = (
-    e: React.DragEvent,
-    index: number
-  ) => {
-    e.preventDefault();
-
-    if (
-      draggedIndex === null ||
-      draggedIndex === index
-    ) {
-      return;
-    }
-
-    const readOnlyBooks =
-      books.filter(
-        (book) => book.isRead
-      );
-
-    const itemToMove =
-      readOnlyBooks[draggedIndex];
-
-    const targetBook =
-      readOnlyBooks[index];
-
-    if (!itemToMove || !targetBook) {
-      return;
-    }
-
-    const updated = [...books];
-
-    const sourceGlobalIdx =
-      updated.findIndex(
-        (book) =>
-          book.id === itemToMove.id
-      );
-
-    const targetGlobalIdx =
-      updated.findIndex(
-        (book) =>
-          book.id === targetBook.id
-      );
-
-    if (
-      sourceGlobalIdx < 0 ||
-      targetGlobalIdx < 0
-    ) {
-      return;
-    }
-
-    updated.splice(
-      sourceGlobalIdx,
-      1
-    );
-
-    updated.splice(
-      targetGlobalIdx,
-      0,
-      itemToMove
-    );
-
-    setDraggedIndex(index);
-    setBooks(updated);
-  };
-
-  const handleDragEnd = () => {
-    setDraggedIndex(null);
-  };
-
-  /* =========================================================
-     EXPORT
-  ========================================================= */
-
-  const exportToExcel = () => {
-    const dataToExport =
-      books.map((b) => ({
-        Titolo: b.title,
-        Autore: b.author,
-        'Paese di Pubblicazione':
-          b.publishCountry || '-',
-        Classico:
-          b.isClassic ? 'Sì' : 'No',
-        Stato:
-          b.isRead
-            ? 'Letto'
-            : 'In Biblioteca',
-        Formato:
-          b.format === 'cartaceo'
-            ? 'Cartaceo'
-            : b.format === 'ebook'
-              ? 'eBook'
-              : 'eBook + Cartaceo',
-        Editore: b.publisher,
-        'Anno Pubblicazione':
-          b.publishYear,
-        Genere: b.genre,
-        'Serie / Tag':
-          b.seriesTag,
-        Volume:
-          b.volume || '-',
-        Pagine: b.pages,
-        'Mese e Anno di Lettura':
-          b.readMonthYear,
-        ISBN: b.isbn,
-      }));
-
-    const worksheet =
-      XLSX.utils.json_to_sheet(
-        dataToExport
-      );
-
-    const workbook =
-      XLSX.utils.book_new();
-
-    XLSX.utils.book_append_sheet(
-      workbook,
-      worksheet,
-      'Biblioteca'
-    );
-
-    XLSX.writeFile(
-      workbook,
-      'La_Mia_Biblioteca.xlsx'
-    );
-  };
-
-  const exportToPDF = () => {
-    const doc = new jsPDF();
-
-    doc.text(
-      'La Mia Biblioteca - Report',
-      14,
-      15
-    );
-
-    const tableData = books.map(
-      (b) => [
-        b.title,
-        b.author,
-        b.publishCountry || '-',
-        b.isClassic ? 'Sì' : 'No',
-        b.isRead
-          ? 'Letto'
-          : 'In Libreria',
-        b.format === 'cartaceo'
-          ? 'Cartaceo'
-          : b.format === 'ebook'
-            ? 'eBook'
-            : 'eBook + Cartaceo',
-        b.genre || '-',
-        b.readMonthYear || '-',
-      ]
-    );
-
-    autoTable(doc, {
-      head: [
-        [
-          'Titolo',
-          'Autore',
-          'Paese',
-          'Classico',
-          'Stato',
-          'Formato',
-          'Genere',
-          'Data Lettura',
-        ],
-      ],
-      body: tableData,
-      startY: 20,
-    });
-
-    doc.save(
-      'La_Mia_Biblioteca.pdf'
-    );
-  };
-
-  const exportBackup = () => {
-    const dataStr =
-      'data:text/json;charset=utf-8,' +
-      encodeURIComponent(
-        JSON.stringify(books)
-      );
-
-    const downloadAnchor =
-      document.createElement('a');
-
-    downloadAnchor.setAttribute(
-      'href',
-      dataStr
-    );
-
-    downloadAnchor.setAttribute(
-      'download',
-      'backup_libreria.json'
-    );
-
-    document.body.appendChild(
-      downloadAnchor
-    );
-
-    downloadAnchor.click();
-
-    downloadAnchor.remove();
-  };
-
-  const handleImportBackup = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file =
-      e.target.files?.[0];
-
-    if (!file) return;
-
-    const fileReader =
-      new FileReader();
-
-    fileReader.readAsText(
-      file,
-      'UTF-8'
-    );
-
-    fileReader.onload = (
-      event
-    ) => {
-      try {
-        const parsed =
-          JSON.parse(
-            event.target?.result as string
-          );
-
-        if (Array.isArray(parsed)) {
-          setBooks(parsed);
-
-          alert(
-            'Backup ripristinato con successo!'
-          );
-        } else {
-          alert(
-            'File di backup non valido.'
-          );
-        }
-      } catch {
-        alert(
-          'File di backup non valido.'
+      if (book.readYear) {
+        return (
+          book.readYear ===
+          currentYearNum
         );
       }
-    };
-  };
 
-  const handleClearAll = () => {
-    if (
-      confirm(
-        'ATTENZIONE: Verranno cancellati TUTTI i libri salvati. Procedere?'
-      )
-    ) {
-      setBooks([]);
-
-      localStorage.removeItem(
-        STORAGE_KEY
+      return !!book.readMonthYear?.includes(
+        currentYearNum.toString()
       );
-    }
-  };
+    });
 
-  /* =========================================================
-     FILTRI LETTI
-  ========================================================= */
+  const readThisYearCount =
+    readThisYearBooks.length;
+
+  const readThisYearCartacei =
+    readThisYearBooks.filter(
+      (book) =>
+        book.format === 'cartaceo' ||
+        book.format ===
+          'ebook_and_paper'
+    ).length;
+
+  const readThisYearEbook =
+    readThisYearBooks.filter(
+      (book) =>
+        book.format === 'ebook' ||
+        book.format ===
+          'ebook_and_paper'
+    ).length;
+
+
+  /* =======================================================
+     FILTRI
+  ======================================================= */
+
+  const availableGenres =
+    Array.from(
+      new Set(
+        books
+          .map((book) => book.genre)
+          .filter(Boolean)
+      )
+    );
+
+  const availableYears =
+    Array.from(
+      new Set(
+        books
+          .map((book) => {
+            if (book.readYear) {
+              return book.readYear.toString();
+            }
+
+            const match =
+              book.readMonthYear?.match(
+                /\d{4}/
+              );
+
+            return match
+              ? match[0]
+              : null;
+          })
+          .filter(Boolean)
+      )
+    );
 
   const readBooksFiltered =
     books
       .filter(
-        (b) => b.isRead
+        (book) => book.isRead
       )
-      .filter(
-        (b) =>
-          filterGenre === 'all'
-            ? true
-            : b.genre === filterGenre
+      .filter((book) =>
+        filterGenre === 'all'
+          ? true
+          : book.genre ===
+            filterGenre
       )
-      .filter((b) => {
+      .filter((book) => {
         if (
           filterFormat === 'all'
         ) {
@@ -1196,25 +1098,26 @@ export default function LibraryApp() {
           'cartaceo'
         ) {
           return (
-            b.format ===
+            book.format ===
             'cartaceo'
           );
         }
 
         if (
-          filterFormat === 'ebook'
+          filterFormat ===
+          'ebook'
         ) {
           return (
-            b.format ===
+            book.format ===
               'ebook' ||
-            b.format ===
+            book.format ===
               'ebook_and_paper'
           );
         }
 
         return true;
       })
-      .filter((b) => {
+      .filter((book) => {
         if (
           filterYear === 'all'
         ) {
@@ -1222,14 +1125,14 @@ export default function LibraryApp() {
         }
 
         return (
-          b.readYear?.toString() ===
+          book.readYear?.toString() ===
             filterYear ||
-          b.readMonthYear?.includes(
+          book.readMonthYear?.includes(
             filterYear
           )
         );
       })
-      .filter((b) => {
+      .filter((book) => {
         if (!searchQuery) {
           return true;
         }
@@ -1238,38 +1141,42 @@ export default function LibraryApp() {
           searchQuery.toLowerCase();
 
         return (
-          b.title
+          book.title
             .toLowerCase()
             .includes(query) ||
-          b.author
+          book.author
             .toLowerCase()
             .includes(query)
         );
       });
 
-  /* =========================================================
-     AUTORI / GENERI
-  ========================================================= */
+
+  /* =======================================================
+     AUTORI
+  ======================================================= */
 
   const authorsMap =
     books.reduce(
       (
-        acc,
+        accumulator,
         book
       ) => {
-        const authorName =
+        const author =
           book.author.trim() ||
           'Autore Sconosciuto';
 
-        if (!acc[authorName]) {
-          acc[authorName] = [];
+        if (
+          !accumulator[author]
+        ) {
+          accumulator[author] =
+            [];
         }
 
-        acc[authorName].push(
+        accumulator[author].push(
           book
         );
 
-        return acc;
+        return accumulator;
       },
       {} as Record<
         string,
@@ -1284,25 +1191,33 @@ export default function LibraryApp() {
       a.localeCompare(b)
     );
 
+
+  /* =======================================================
+     GENERI
+  ======================================================= */
+
   const genresMap =
     books.reduce(
       (
-        acc,
+        accumulator,
         book
       ) => {
-        const genreName =
+        const genre =
           book.genre?.trim() ||
           'Generico / Altro';
 
-        if (!acc[genreName]) {
-          acc[genreName] = [];
+        if (
+          !accumulator[genre]
+        ) {
+          accumulator[genre] =
+            [];
         }
 
-        acc[genreName].push(
+        accumulator[genre].push(
           book
         );
 
-        return acc;
+        return accumulator;
       },
       {} as Record<
         string,
@@ -1317,47 +1232,98 @@ export default function LibraryApp() {
       a.localeCompare(b)
     );
 
-  const availableGenres =
-    Array.from(
-      new Set(
-        books
-          .map(
-            (b) => b.genre
-          )
-          .filter(Boolean)
-      )
+
+  /* =======================================================
+     DRAG
+  ======================================================= */
+
+  const handleDragStart = (
+    index: number
+  ) => {
+    setDraggedIndex(index);
+  };
+
+  const handleDragOver = (
+    event: React.DragEvent,
+    index: number
+  ) => {
+    event.preventDefault();
+
+    if (
+      draggedIndex === null ||
+      draggedIndex === index
+    ) {
+      return;
+    }
+
+    const readOnlyBooks =
+      books.filter(
+        (book) => book.isRead
+      );
+
+    const itemToMove =
+      readOnlyBooks[
+        draggedIndex
+      ];
+
+    const targetBook =
+      readOnlyBooks[index];
+
+    if (
+      !itemToMove ||
+      !targetBook
+    ) {
+      return;
+    }
+
+    const updated = [
+      ...books,
+    ];
+
+    const sourceIndex =
+      updated.findIndex(
+        (book) =>
+          book.id ===
+          itemToMove.id
+      );
+
+    const targetIndex =
+      updated.findIndex(
+        (book) =>
+          book.id ===
+          targetBook.id
+      );
+
+    if (
+      sourceIndex < 0 ||
+      targetIndex < 0
+    ) {
+      return;
+    }
+
+    updated.splice(
+      sourceIndex,
+      1
     );
 
-  const availableYears =
-    Array.from(
-      new Set(
-        books
-          .map((b) => {
-            if (b.readYear) {
-              return b.readYear.toString();
-            }
-
-            const match =
-              b.readMonthYear?.match(
-                /\d{4}/
-              );
-
-            return match
-              ? match[0]
-              : null;
-          })
-          .filter(
-            (
-              value
-            ): value is string =>
-              Boolean(value)
-          )
-      )
+    updated.splice(
+      targetIndex,
+      0,
+      itemToMove
     );
 
-  /* =========================================================
+    setDraggedIndex(index);
+    setBooks(updated);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedIndex(null);
+  };
+
+
+  /* =======================================================
      FORMAT
-  ========================================================= */
+  ======================================================= */
 
   const formatLabel = (
     format: string
@@ -1384,9 +1350,10 @@ export default function LibraryApp() {
     return format;
   };
 
-  /* =========================================================
-     GRUPPO AUTORI
-  ========================================================= */
+
+  /* =======================================================
+     AUTORE / LIBRI
+  ======================================================= */
 
   const renderAuthorGroup = (
     bookList: BookItem[]
@@ -1394,22 +1361,25 @@ export default function LibraryApp() {
     const map =
       bookList.reduce(
         (
-          acc,
+          accumulator,
           book
         ) => {
           const author =
             book.author.trim() ||
             'Autore Sconosciuto';
 
-          if (!acc[author]) {
-            acc[author] = [];
+          if (
+            !accumulator[author]
+          ) {
+            accumulator[author] =
+              [];
           }
 
-          acc[author].push(
+          accumulator[author].push(
             book
           );
 
-          return acc;
+          return accumulator;
         },
         {} as Record<
           string,
@@ -1421,109 +1391,350 @@ export default function LibraryApp() {
       map
     )
       .sort()
-      .map(
-        (author) => (
-          <div
-            key={author}
-            className="space-y-2 pt-2"
-          >
-            <h3 className="font-serif font-bold text-sm text-amber-950 border-b border-amber-900/10 pb-1">
-              {author}
-            </h3>
+      .map((author) => (
+        <div
+          key={author}
+          className="space-y-2 pt-2"
+        >
+          <h3 className="font-serif font-bold text-sm text-amber-950 border-b border-amber-900/10 pb-1">
+            {author}
+          </h3>
 
-            <div className="grid grid-cols-2 gap-3">
-              {map[author]
-                .sort(
-                  (
-                    a,
-                    b
-                  ) =>
-                    (
-                      a.volume ||
-                      ''
-                    ).localeCompare(
-                      b.volume ||
-                        ''
-                    )
+          <div className="grid grid-cols-2 gap-3">
+            {map[author]
+              .sort((a, b) =>
+                (
+                  a.volume || ''
+                ).localeCompare(
+                  b.volume || ''
                 )
-                .map(
-                  (
-                    book
-                  ) => (
-                    <div
-                      key={
-                        book.id
-                      }
-                      onClick={() =>
-                        setSelectedBookDetail(
-                          book
-                        )
-                      }
-                      className="bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex flex-col cursor-pointer"
-                    >
-                      <div className="w-full h-36 bg-amber-100/40 rounded-xl overflow-hidden relative mb-2 border border-amber-900/10">
-                        {book.coverUrl ? (
-                          <img
-                            src={
-                              book.coverUrl
-                            }
-                            alt={
-                              book.title
-                            }
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-amber-800/30">
-                            <Book className="w-6 h-6" />
-                          </div>
-                        )}
-
-                        {book.isRead && (
-                          <div className="absolute top-2 right-2 bg-emerald-700 text-amber-50 p-1 rounded-full shadow">
-                            <CheckCircle2 className="w-3 h-3" />
-                          </div>
-                        )}
-
-                        {book.volume && (
-                          <div className="absolute top-2 left-2 bg-amber-800 text-amber-50 text-[9px] font-bold px-2 py-0.5 rounded-full">
-                            Vol.{' '}
-                            {
-                              book.volume
-                            }
-                          </div>
-                        )}
-                      </div>
-
-                      <h4 className="font-serif font-bold text-xs text-amber-950 line-clamp-2">
-                        {
+              )
+              .map((book) => (
+                <div
+                  key={book.id}
+                  onClick={() =>
+                    setSelectedBookDetail(
+                      book
+                    )
+                  }
+                  className="bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex flex-col cursor-pointer"
+                >
+                  <div className="w-full h-36 bg-amber-100/40 rounded-xl overflow-hidden relative mb-2 border border-amber-900/10">
+                    {book.coverUrl ? (
+                      <img
+                        src={
+                          book.coverUrl
+                        }
+                        alt={
                           book.title
                         }
-                      </h4>
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-amber-800/30">
+                        <Book className="w-6 h-6" />
+                      </div>
+                    )}
 
-                      <p className="text-[10px] text-amber-800/60 mt-0.5">
-                        {book.publishYear
-                          ? `Anno: ${book.publishYear}`
-                          : ''}
-                      </p>
-                    </div>
-                  )
-                )}
-            </div>
+                    {book.isRead && (
+                      <div className="absolute top-2 right-2 bg-emerald-700 text-amber-50 p-1 rounded-full shadow">
+                        <CheckCircle2 className="w-3 h-3" />
+                      </div>
+                    )}
+
+                    {book.volume && (
+                      <div className="absolute top-2 left-2 bg-amber-800 text-amber-50 text-[9px] font-bold px-2 py-0.5 rounded-full">
+                        Vol.{' '}
+                        {
+                          book.volume
+                        }
+                      </div>
+                    )}
+                  </div>
+
+                  <h4 className="font-serif font-bold text-xs text-amber-950 line-clamp-2">
+                    {
+                      book.title
+                    }
+                  </h4>
+
+                  <p className="text-[10px] text-amber-800/60 mt-0.5">
+                    {book.publishYear
+                      ? `Anno: ${book.publishYear}`
+                      : ''}
+                  </p>
+                </div>
+              ))}
           </div>
-        )
-      );
+        </div>
+      ));
   };
 
-  /* =========================================================
+
+  /* =======================================================
+     EXPORT EXCEL
+  ======================================================= */
+
+  const exportToExcel = () => {
+    const data =
+      books.map(
+        (book) => ({
+          Titolo:
+            book.title,
+          Autore:
+            book.author,
+          'Paese di Pubblicazione':
+            book.publishCountry ||
+            '-',
+          Classico:
+            book.isClassic
+              ? 'Sì'
+              : 'No',
+          Stato:
+            book.isRead
+              ? 'Letto'
+              : 'In Biblioteca',
+          Formato:
+            formatLabel(
+              book.format
+            ),
+          Editore:
+            book.publisher ||
+            '',
+          'Anno Pubblicazione':
+            book.publishYear ||
+            '',
+          Genere:
+            book.genre ||
+            '',
+          'Serie / Tag':
+            book.seriesTag ||
+            '',
+          Volume:
+            book.volume ||
+            '',
+          Pagine:
+            book.pages ||
+            '',
+          'Mese e Anno di Lettura':
+            book.readMonthYear ||
+            '',
+          ISBN:
+            book.isbn ||
+            '',
+        })
+      );
+
+    const worksheet =
+      XLSX.utils.json_to_sheet(
+        data
+      );
+
+    const workbook =
+      XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      'Biblioteca'
+    );
+
+    XLSX.writeFile(
+      workbook,
+      'La_Mia_Biblioteca.xlsx'
+    );
+  };
+
+
+  /* =======================================================
+     EXPORT PDF
+  ======================================================= */
+
+  const exportToPDF = () => {
+    const doc =
+      new jsPDF();
+
+    doc.text(
+      'La Mia Biblioteca - Report',
+      14,
+      15
+    );
+
+    const tableData =
+      books.map(
+        (book) => [
+          book.title,
+          book.author,
+          book.publishCountry ||
+            '-',
+          book.isClassic
+            ? 'Sì'
+            : 'No',
+          book.isRead
+            ? 'Letto'
+            : 'In Libreria',
+          formatLabel(
+            book.format
+          ),
+          book.genre ||
+            '-',
+          book.readMonthYear ||
+            '-',
+        ]
+      );
+
+    autoTable(doc, {
+      head: [
+        [
+          'Titolo',
+          'Autore',
+          'Paese',
+          'Classico',
+          'Stato',
+          'Formato',
+          'Genere',
+          'Data Lettura',
+        ],
+      ],
+      body: tableData,
+      startY: 20,
+    });
+
+    doc.save(
+      'La_Mia_Biblioteca.pdf'
+    );
+  };
+
+
+  /* =======================================================
+     BACKUP
+  ======================================================= */
+
+  const exportBackup = () => {
+    const dataStr =
+      'data:text/json;charset=utf-8,' +
+      encodeURIComponent(
+        JSON.stringify(
+          books,
+          null,
+          2
+        )
+      );
+
+    const anchor =
+      document.createElement(
+        'a'
+      );
+
+    anchor.setAttribute(
+      'href',
+      dataStr
+    );
+
+    anchor.setAttribute(
+      'download',
+      'backup_libreria.json'
+    );
+
+    document.body.appendChild(
+      anchor
+    );
+
+    anchor.click();
+
+    anchor.remove();
+  };
+
+
+  /* =======================================================
+     IMPORT BACKUP
+  ======================================================= */
+
+  const handleImportBackup = (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file =
+      event.target.files?.[0];
+
+    if (!file) return;
+
+    const reader =
+      new FileReader();
+
+    reader.onload = (
+      loadEvent
+    ) => {
+      try {
+        const parsed =
+          JSON.parse(
+            loadEvent.target
+              ?.result as string
+          );
+
+        if (
+          !Array.isArray(
+            parsed
+          )
+        ) {
+          throw new Error(
+            'Formato non valido'
+          );
+        }
+
+        setBooks(parsed);
+
+        alert(
+          'Backup ripristinato con successo!'
+        );
+      } catch (error) {
+        console.error(error);
+
+        alert(
+          'File di backup non valido.'
+        );
+      }
+    };
+
+    reader.readAsText(
+      file,
+      'UTF-8'
+    );
+
+    event.target.value = '';
+  };
+
+
+  /* =======================================================
+     CLEAR
+  ======================================================= */
+
+  const handleClearAll = () => {
+    if (
+      !confirm(
+        'ATTENZIONE: verranno cancellati TUTTI i libri. Procedere?'
+      )
+    ) {
+      return;
+    }
+
+    setBooks([]);
+
+    localStorage.removeItem(
+      STORAGE_KEY
+    );
+  };
+
+
+  /* =======================================================
      RENDER
-  ========================================================= */
+  ======================================================= */
 
   return (
     <div className="min-h-screen bg-[#FBF9F5] text-amber-950 font-sans pb-24 select-none">
 
-      {/* =====================================================
+      {/* =================================================
           HEADER
-      ===================================================== */}
+      ================================================= */}
 
       <header className="sticky top-0 z-20 bg-[#FBF9F5]/90 backdrop-blur-md border-b border-amber-900/10 px-5 py-3.5 flex justify-between items-center">
 
@@ -1535,12 +1746,10 @@ export default function LibraryApp() {
             {activeTab === 'read' &&
               'Cronologia Letture'}
 
-            {activeTab ===
-              'authors' &&
+            {activeTab === 'authors' &&
               'Catalogo Autori'}
 
-            {activeTab ===
-              'settings' &&
+            {activeTab === 'settings' &&
               'Gestione Dati'}
           </span>
 
@@ -1551,8 +1760,7 @@ export default function LibraryApp() {
             {activeTab === 'read' &&
               'Libri Letti'}
 
-            {activeTab ===
-              'authors' &&
+            {activeTab === 'authors' &&
               (selectedAuthor ||
                 'Autori')}
 
@@ -1577,9 +1785,10 @@ export default function LibraryApp() {
         )}
       </header>
 
-      {/* =====================================================
+
+      {/* =================================================
           HOME
-      ===================================================== */}
+      ================================================= */}
 
       {activeTab === 'home' && (
         <div className="p-4 space-y-5 max-w-lg mx-auto">
@@ -1597,7 +1806,7 @@ export default function LibraryApp() {
                     null
                   );
                 }}
-                className="text-xs font-bold text-amber-800 flex items-center gap-1"
+                className="text-xs font-bold text-amber-800"
               >
                 ← Torna alla Home
               </button>
@@ -1605,18 +1814,19 @@ export default function LibraryApp() {
               {homeSubView ===
                 'classics' && (
                 <div className="space-y-3">
+
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-5 h-5 text-amber-600" />
 
-                    <h2 className="text-lg font-serif font-bold text-amber-950">
+                    <h2 className="text-lg font-serif font-bold">
                       I Miei Classici
                     </h2>
                   </div>
 
                   {renderAuthorGroup(
                     books.filter(
-                      (b) =>
-                        b.isClassic
+                      (book) =>
+                        book.isClassic
                     )
                   )}
                 </div>
@@ -1629,8 +1839,9 @@ export default function LibraryApp() {
                   {!selectedGenreHome ? (
                     <div className="space-y-2">
 
-                      <h2 className="text-lg font-serif font-bold text-amber-950 mb-2">
-                        Generi nella Biblioteca
+                      <h2 className="text-lg font-serif font-bold mb-2">
+                        Generi nella
+                        Biblioteca
                       </h2>
 
                       {sortedGenres.map(
@@ -1649,25 +1860,20 @@ export default function LibraryApp() {
                             className="bg-[#FFFDF9] p-4 rounded-2xl shadow-sm border border-amber-900/10 flex justify-between items-center cursor-pointer"
                           >
                             <div>
-                              <h3 className="font-serif font-bold text-base text-amber-950">
+                              <h3 className="font-serif font-bold">
                                 {
                                   genre
                                 }
                               </h3>
 
-                              <p className="text-xs text-amber-800/60 font-medium">
+                              <p className="text-xs text-amber-800/60">
                                 {
                                   genresMap[
                                     genre
                                   ]
                                     .length
                                 }{' '}
-                                {genresMap[
-                                  genre
-                                ].length ===
-                                1
-                                  ? 'libro'
-                                  : 'libri'}
+                                libri
                               </p>
                             </div>
 
@@ -1685,12 +1891,12 @@ export default function LibraryApp() {
                             null
                           )
                         }
-                        className="text-xs font-bold text-amber-800 mb-1 block"
+                        className="text-xs font-bold text-amber-800"
                       >
                         ← Tutti i generi
                       </button>
 
-                      <h2 className="text-lg font-serif font-bold text-amber-950">
+                      <h2 className="text-lg font-serif font-bold">
                         {
                           selectedGenreHome
                         }
@@ -1708,16 +1914,15 @@ export default function LibraryApp() {
             </div>
           ) : (
             <>
-              <div className="bg-[#FFFDF9] rounded-3xl p-5 shadow-sm border border-amber-900/10 space-y-3">
+              <div className="bg-[#FFFDF9] rounded-3xl p-5 shadow-sm border border-amber-900/10">
 
                 <div className="flex items-center gap-4">
 
-                  <div className="w-12 h-12 rounded-2xl bg-amber-800 text-amber-50 flex items-center justify-center shadow-md flex-shrink-0">
+                  <div className="w-12 h-12 rounded-2xl bg-amber-800 text-amber-50 flex items-center justify-center">
                     <Calendar className="w-6 h-6" />
                   </div>
 
-                  <div className="flex-1">
-
+                  <div>
                     <span className="text-xs font-bold text-amber-800/60 uppercase tracking-wider block">
                       Anno{' '}
                       {
@@ -1725,7 +1930,7 @@ export default function LibraryApp() {
                       }
                     </span>
 
-                    <span className="text-2xl font-serif font-bold text-amber-950">
+                    <span className="text-2xl font-serif font-bold">
                       {
                         readThisYearCount
                       }{' '}
@@ -1736,88 +1941,79 @@ export default function LibraryApp() {
                   </div>
                 </div>
 
-                <div className="pt-2.5 border-t border-amber-900/10 flex items-center justify-center text-xs font-semibold text-amber-900/80">
-                  <span>
-                    {
-                      readThisYearCartacei
-                    }{' '}
-                    Cartacei e{' '}
-                    {
-                      readThisYearEbook
-                    }{' '}
-                    eBook
-                  </span>
+                <div className="pt-3 mt-3 border-t border-amber-900/10 text-center text-xs font-semibold">
+                  {
+                    readThisYearCartacei
+                  }{' '}
+                  Cartacei e{' '}
+                  {
+                    readThisYearEbook
+                  }{' '}
+                  eBook
                 </div>
               </div>
+
 
               <div className="grid grid-cols-2 gap-3.5">
 
-                <div className="bg-[#FFFDF9] p-4 rounded-3xl shadow-sm border border-amber-900/10 flex flex-col justify-between min-h-[9rem]">
+                <div className="bg-[#FFFDF9] p-4 rounded-3xl shadow-sm border border-amber-900/10">
 
-                  <div className="w-10 h-10 rounded-2xl bg-amber-100/70 text-amber-900 flex items-center justify-center">
-                    <BookOpen className="w-5 h-5" />
-                  </div>
+                  <BookOpen className="w-5 h-5 mb-6" />
 
-                  <div className="mt-2">
+                  <span className="text-3xl font-serif font-black">
+                    {
+                      totalBooks
+                    }
+                  </span>
 
-                    <span className="text-3xl font-serif font-black text-amber-950 leading-none">
-                      {
-                        totalBooks
-                      }
-                    </span>
+                  <span className="text-xs font-bold text-amber-800/60 uppercase tracking-wider block mt-1">
+                    In Biblioteca
+                  </span>
 
-                    <span className="text-xs font-bold text-amber-800/60 uppercase tracking-wider block mt-1">
-                      In Biblioteca
-                    </span>
-
-                    <div className="mt-2 pt-2 border-t border-amber-900/10 text-xs font-semibold text-amber-900/80">
-                      {
-                        totalCartacei
-                      }{' '}
-                      Cartacei e{' '}
-                      {
-                        totalEbook
-                      }{' '}
-                      eBook
-                    </div>
+                  <div className="mt-2 pt-2 border-t border-amber-900/10 text-xs font-semibold">
+                    {
+                      totalCartacei
+                    }{' '}
+                    Cartacei e{' '}
+                    {
+                      totalEbook
+                    }{' '}
+                    eBook
                   </div>
                 </div>
 
-                <div className="bg-[#FFFDF9] p-4 rounded-3xl shadow-sm border border-amber-900/10 flex flex-col justify-between min-h-[9rem]">
 
-                  <div className="w-10 h-10 rounded-2xl bg-emerald-100/70 text-emerald-800 flex items-center justify-center">
-                    <CheckCircle2 className="w-5 h-5" />
-                  </div>
+                <div className="bg-[#FFFDF9] p-4 rounded-3xl shadow-sm border border-amber-900/10">
 
-                  <div className="mt-2">
+                  <CheckCircle2 className="w-5 h-5 mb-6 text-emerald-700" />
 
-                    <span className="text-3xl font-serif font-black text-amber-950 leading-none">
-                      {
-                        readBooksCount
-                      }
-                    </span>
+                  <span className="text-3xl font-serif font-black">
+                    {
+                      readBooksCount
+                    }
+                  </span>
 
-                    <span className="text-xs font-bold text-amber-800/60 uppercase tracking-wider block mt-1">
-                      Libri Letti
-                    </span>
+                  <span className="text-xs font-bold text-amber-800/60 uppercase tracking-wider block mt-1">
+                    Libri Letti
+                  </span>
 
-                    <div className="mt-2 pt-2 border-t border-amber-900/10 text-xs font-semibold text-amber-900/80">
-                      {
-                        readCartacei
-                      }{' '}
-                      Cartacei e{' '}
-                      {
-                        readEbook
-                      }{' '}
-                      eBook
-                    </div>
+                  <div className="mt-2 pt-2 border-t border-amber-900/10 text-xs font-semibold">
+                    {
+                      readCartacei
+                    }{' '}
+                    Cartacei e{' '}
+                    {
+                      readEbook
+                    }{' '}
+                    eBook
                   </div>
                 </div>
               </div>
 
+
               <div className="space-y-3 pt-2">
 
-                <h2 className="text-xs font-bold text-amber-800/60 uppercase tracking-wider px-1">
+                <h2 className="text-xs font-bold text-amber-800/60 uppercase tracking-wider">
                   Esplora Categorie
                 </h2>
 
@@ -1829,20 +2025,20 @@ export default function LibraryApp() {
                         'classics'
                       )
                     }
-                    className="bg-gradient-to-br from-amber-700 to-amber-900 text-amber-50 p-4 rounded-3xl shadow-md cursor-pointer active:scale-95 transition-transform flex flex-col justify-between h-32 relative overflow-hidden"
+                    className="bg-gradient-to-br from-amber-700 to-amber-900 text-amber-50 p-4 rounded-3xl shadow-md cursor-pointer h-32 flex flex-col justify-between"
                   >
-                    <Sparkles className="w-6 h-6 text-amber-200" />
+                    <Sparkles />
 
                     <div>
                       <span className="text-lg font-serif font-bold block">
                         Classici
                       </span>
 
-                      <span className="text-xs text-amber-200/80 font-medium">
+                      <span className="text-xs text-amber-200/80">
                         {
                           books.filter(
-                            (b) =>
-                              b.isClassic
+                            (book) =>
+                              book.isClassic
                           ).length
                         }{' '}
                         libri conservati
@@ -1850,22 +2046,23 @@ export default function LibraryApp() {
                     </div>
                   </div>
 
+
                   <div
                     onClick={() =>
                       setHomeSubView(
                         'genres'
                       )
                     }
-                    className="bg-gradient-to-br from-stone-800 to-amber-950 text-amber-50 p-4 rounded-3xl shadow-md cursor-pointer active:scale-95 transition-transform flex flex-col justify-between h-32 relative overflow-hidden"
+                    className="bg-gradient-to-br from-stone-800 to-amber-950 text-amber-50 p-4 rounded-3xl shadow-md cursor-pointer h-32 flex flex-col justify-between"
                   >
-                    <Layers className="w-6 h-6 text-amber-300" />
+                    <Layers />
 
                     <div>
                       <span className="text-lg font-serif font-bold block">
                         Generi
                       </span>
 
-                      <span className="text-xs text-amber-200/80 font-medium">
+                      <span className="text-xs text-amber-200/80">
                         {
                           sortedGenres.length
                         }{' '}
@@ -1881,131 +2078,144 @@ export default function LibraryApp() {
         </div>
       )}
 
-      {/* =====================================================
-          LIBRI LETTI
-      ===================================================== */}
+
+      {/* =================================================
+          LETTI
+      ================================================= */}
 
       {activeTab === 'read' && (
         <div className="p-4 space-y-4 max-w-lg mx-auto">
 
-          <div className="space-y-2.5">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3.5 top-3 text-amber-800/40" />
 
-            <div className="relative">
-
-              <Search className="w-4 h-4 absolute left-3.5 top-3 text-amber-800/40" />
-
-              <input
-                type="text"
-                placeholder="Cerca nei libri letti..."
-                value={
-                  searchQuery
-                }
-                onChange={(e) =>
-                  setSearchQuery(
-                    e.target.value
-                  )
-                }
-                className="w-full pl-9 pr-4 py-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-2xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
-              />
-            </div>
-
-            <div className="flex gap-2 overflow-x-auto pb-1 text-xs">
-
-              <select
-                value={
-                  filterGenre
-                }
-                onChange={(e) =>
-                  setFilterGenre(
-                    e.target.value
-                  )
-                }
-                className="bg-[#FFFDF9] border border-amber-900/10 rounded-xl px-3 py-2 font-medium text-amber-950"
-              >
-                <option value="all">
-                  Tutti i generi
-                </option>
-
-                {availableGenres.map(
-                  (genre) => (
-                    <option
-                      key={genre}
-                      value={genre}
-                    >
-                      {genre}
-                    </option>
-                  )
-                )}
-              </select>
-
-              <select
-                value={
-                  filterFormat
-                }
-                onChange={(e) =>
-                  setFilterFormat(
-                    e.target.value
-                  )
-                }
-                className="bg-[#FFFDF9] border border-amber-900/10 rounded-xl px-3 py-2 font-medium text-amber-950"
-              >
-                <option value="all">
-                  Tutti i formati
-                </option>
-
-                <option value="cartaceo">
-                  Cartaceo
-                </option>
-
-                <option value="ebook">
-                  eBook
-                </option>
-              </select>
-
-              <select
-                value={
-                  filterYear
-                }
-                onChange={(e) =>
-                  setFilterYear(
-                    e.target.value
-                  )
-                }
-                className="bg-[#FFFDF9] border border-amber-900/10 rounded-xl px-3 py-2 font-medium text-amber-950"
-              >
-                <option value="all">
-                  Tutti gli anni
-                </option>
-
-                {availableYears.map(
-                  (year) => (
-                    <option
-                      key={year}
-                      value={year}
-                    >
-                      {year}
-                    </option>
-                  )
-                )}
-              </select>
-
-            </div>
+            <input
+              type="text"
+              placeholder="Cerca nei libri letti..."
+              value={
+                searchQuery
+              }
+              onChange={(event) =>
+                setSearchQuery(
+                  event.target.value
+                )
+              }
+              className="w-full pl-9 pr-4 py-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-2xl text-xs"
+            />
           </div>
 
-          <p className="text-[11px] text-amber-800/50 font-medium px-1">
-            Trascina tramite l'icona a sinistra per riordinare l'elenco dei libri letti.
+
+          <div className="flex gap-2 overflow-x-auto pb-1">
+
+            <select
+              value={
+                filterGenre
+              }
+              onChange={(event) =>
+                setFilterGenre(
+                  event.target.value
+                )
+              }
+              className="bg-[#FFFDF9] border border-amber-900/10 rounded-xl px-3 py-2 text-xs"
+            >
+              <option value="all">
+                Tutti i generi
+              </option>
+
+              {availableGenres.map(
+                (genre) => (
+                  <option
+                    key={
+                      genre
+                    }
+                    value={
+                      genre
+                    }
+                  >
+                    {
+                      genre
+                    }
+                  </option>
+                )
+              )}
+            </select>
+
+
+            <select
+              value={
+                filterFormat
+              }
+              onChange={(event) =>
+                setFilterFormat(
+                  event.target.value
+                )
+              }
+              className="bg-[#FFFDF9] border border-amber-900/10 rounded-xl px-3 py-2 text-xs"
+            >
+              <option value="all">
+                Tutti i formati
+              </option>
+
+              <option value="cartaceo">
+                Cartaceo
+              </option>
+
+              <option value="ebook">
+                eBook
+              </option>
+            </select>
+
+
+            <select
+              value={
+                filterYear
+              }
+              onChange={(event) =>
+                setFilterYear(
+                  event.target.value
+                )
+              }
+              className="bg-[#FFFDF9] border border-amber-900/10 rounded-xl px-3 py-2 text-xs"
+            >
+              <option value="all">
+                Tutti gli anni
+              </option>
+
+              {availableYears.map(
+                (year) => (
+                  <option
+                    key={
+                      year
+                    }
+                    value={
+                      year || ''
+                    }
+                  >
+                    {
+                      year
+                    }
+                  </option>
+                )
+              )}
+            </select>
+          </div>
+
+
+          <p className="text-[11px] text-amber-800/50">
+            Trascina i libri per riordinarli.
           </p>
+
 
           <div className="space-y-3">
 
             {readBooksFiltered.length ===
             0 ? (
               <div className="text-center py-12 bg-[#FFFDF9] rounded-3xl border border-dashed border-amber-900/20">
+                <BookOpen className="w-8 h-8 mx-auto mb-2 text-amber-800/30" />
 
-                <BookOpen className="w-8 h-8 text-amber-800/30 mx-auto mb-2" />
-
-                <p className="text-xs text-amber-800/60 font-medium">
-                  Nessun libro letto trovato.
+                <p className="text-xs text-amber-800/60">
+                  Nessun libro
+                  trovato.
                 </p>
               </div>
             ) : (
@@ -2024,26 +2234,26 @@ export default function LibraryApp() {
                         index
                       )
                     }
-                    onDragOver={(e) =>
+                    onDragOver={(
+                      event
+                    ) =>
                       handleDragOver(
-                        e,
+                        event,
                         index
                       )
                     }
                     onDragEnd={
                       handleDragEnd
                     }
-                    className={`bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex items-center gap-3 transition-colors ${
+                    className={`bg-[#FFFDF9] p-3 rounded-2xl border border-amber-900/10 flex items-center gap-3 ${
                       draggedIndex ===
                       index
-                        ? 'bg-amber-100/50'
-                        : 'hover:bg-amber-50/50'
+                        ? 'bg-amber-100'
+                        : ''
                     }`}
                   >
 
-                    <div className="cursor-grab active:cursor-grabbing text-amber-800/30 hover:text-amber-800">
-                      <GripVertical className="w-5 h-5" />
-                    </div>
+                    <GripVertical className="w-5 h-5 text-amber-800/30" />
 
                     <div
                       onClick={() =>
@@ -2051,7 +2261,7 @@ export default function LibraryApp() {
                           book
                         )
                       }
-                      className="w-13 h-19 bg-amber-100/40 rounded-lg overflow-hidden flex-shrink-0 relative border border-amber-900/10 cursor-pointer"
+                      className="w-13 h-19 bg-amber-100/40 rounded-lg overflow-hidden flex-shrink-0 cursor-pointer"
                     >
                       {book.coverUrl ? (
                         <img
@@ -2064,11 +2274,12 @@ export default function LibraryApp() {
                           className="w-full h-full object-cover"
                         />
                       ) : (
-                        <div className="w-full h-full flex items-center justify-center text-amber-800/30">
+                        <div className="w-full h-full flex items-center justify-center">
                           <Book className="w-5 h-5" />
                         </div>
                       )}
                     </div>
+
 
                     <div
                       onClick={() =>
@@ -2078,7 +2289,7 @@ export default function LibraryApp() {
                       }
                       className="flex-1 min-w-0 cursor-pointer"
                     >
-                      <h3 className="font-serif font-bold text-sm text-amber-950 truncate">
+                      <h3 className="font-serif font-bold text-sm truncate">
                         {
                           book.title
                         }
@@ -2090,39 +2301,41 @@ export default function LibraryApp() {
                         }
                       </p>
 
-                      {book.rating && (
-                        <div className="flex text-amber-500 mt-1">
-                          {[
-                            ...Array(
-                              5
-                            ),
-                          ].map(
-                            (
-                              _,
-                              i
-                            ) => (
-                              <Star
-                                key={
-                                  i
-                                }
-                                className={`w-3 h-3 ${
-                                  i <
-                                  book.rating!
-                                    ? 'fill-amber-500'
-                                    : 'text-amber-200'
-                                }`}
-                              />
-                            )
-                          )}
-                        </div>
-                      )}
+                      <div className="flex text-amber-500 mt-1">
+                        {[
+                          0,
+                          1,
+                          2,
+                          3,
+                          4,
+                        ].map(
+                          (
+                            star
+                          ) => (
+                            <Star
+                              key={
+                                star
+                              }
+                              className={`w-3 h-3 ${
+                                star <
+                                (book.rating ||
+                                  0)
+                                  ? 'fill-amber-500'
+                                  : 'text-amber-200'
+                              }`}
+                            />
+                          )
+                        )}
+                      </div>
 
-                      <p className="text-[10px] font-semibold text-amber-800/50 mt-1">
+                      <p className="text-[10px] mt-1">
                         Letto:{' '}
-                        <span className="text-amber-950">
-                          {book.readMonthYear ||
-                            'Data non specificata'}
-                        </span>
+                        <b>
+                          {
+                            book.readMonthYear ||
+                            'Data non specificata'
+                          }
+                        </b>
                       </p>
                     </div>
 
@@ -2135,70 +2348,61 @@ export default function LibraryApp() {
         </div>
       )}
 
-      {/* =====================================================
+
+      {/* =================================================
           AUTORI
-      ===================================================== */}
+      ================================================= */}
 
       {activeTab === 'authors' && (
-        <div className="p-4 space-y-4 max-w-lg mx-auto">
+        <div className="p-4 max-w-lg mx-auto">
 
           {!selectedAuthor ? (
             <div className="space-y-2">
 
               {sortedAuthors.length ===
               0 ? (
-                <div className="text-center py-12 bg-[#FFFDF9] rounded-3xl border border-dashed border-amber-900/20">
+                <div className="text-center py-12">
+                  <Users className="w-8 h-8 mx-auto mb-2" />
 
-                  <Users className="w-8 h-8 text-amber-800/30 mx-auto mb-2" />
-
-                  <p className="text-xs text-amber-800/60 font-medium">
-                    Nessun autore presente.
+                  <p className="text-xs">
+                    Nessun autore
+                    presente.
                   </p>
                 </div>
               ) : (
                 sortedAuthors.map(
-                  (
-                    author
-                  ) => {
-                    const authorBooks =
-                      authorsMap[
+                  (author) => (
+                    <div
+                      key={
                         author
-                      ];
-
-                    return (
-                      <div
-                        key={
+                      }
+                      onClick={() =>
+                        setSelectedAuthor(
                           author
-                        }
-                        onClick={() =>
-                          setSelectedAuthor(
+                        )
+                      }
+                      className="bg-[#FFFDF9] p-4 rounded-2xl shadow-sm border border-amber-900/10 flex justify-between items-center cursor-pointer"
+                    >
+                      <div>
+                        <h3 className="font-serif font-bold">
+                          {
                             author
-                          )
-                        }
-                        className="bg-[#FFFDF9] p-4 rounded-2xl shadow-sm border border-amber-900/10 flex justify-between items-center cursor-pointer"
-                      >
-                        <div>
-                          <h3 className="font-serif font-bold text-base text-amber-950">
-                            {
+                          }
+                        </h3>
+
+                        <p className="text-xs text-amber-800/60">
+                          {
+                            authorsMap[
                               author
-                            }
-                          </h3>
-
-                          <p className="text-xs text-amber-800/60 font-medium">
-                            {
-                              authorBooks.length
-                            }{' '}
-                            {authorBooks.length ===
-                            1
-                              ? 'libro'
-                              : 'libri'}
-                          </p>
-                        </div>
-
-                        <ChevronRight className="w-5 h-5 text-amber-800/30" />
+                            ].length
+                          }{' '}
+                          libri
+                        </p>
                       </div>
-                    );
-                  }
+
+                      <ChevronRight />
+                    </div>
+                  )
                 )
               )}
             </div>
@@ -2211,19 +2415,23 @@ export default function LibraryApp() {
                     null
                   )
                 }
-                className="text-xs font-bold text-amber-800 flex items-center gap-1 mb-2"
+                className="text-xs font-bold text-amber-800"
               >
-                ← Torna alla lista autori
+                ← Torna alla lista
               </button>
 
-              <div className="grid grid-cols-2 gap-3.5">
+              <h2 className="text-lg font-serif font-bold">
+                {
+                  selectedAuthor
+                }
+              </h2>
+
+              <div className="grid grid-cols-2 gap-3">
 
                 {authorsMap[
                   selectedAuthor
                 ]?.map(
-                  (
-                    book
-                  ) => (
+                  (book) => (
                     <div
                       key={
                         book.id
@@ -2233,10 +2441,10 @@ export default function LibraryApp() {
                           book
                         )
                       }
-                      className="bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex flex-col cursor-pointer relative"
+                      className="bg-[#FFFDF9] p-3 rounded-2xl border border-amber-900/10 cursor-pointer"
                     >
 
-                      <div className="w-full h-44 bg-amber-100/40 rounded-xl overflow-hidden relative border border-amber-900/10 mb-2">
+                      <div className="w-full h-44 bg-amber-100/40 rounded-xl overflow-hidden mb-2">
 
                         {book.coverUrl ? (
                           <img
@@ -2249,111 +2457,87 @@ export default function LibraryApp() {
                             className="w-full h-full object-cover"
                           />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center text-amber-800/30">
-                            <Book className="w-8 h-8" />
-                          </div>
-                        )}
-
-                        {book.isRead && (
-                          <div className="absolute top-2 right-2 bg-emerald-700 text-amber-50 p-1 rounded-full shadow-md">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                          </div>
-                        )}
-
-                        <div className="absolute bottom-2 left-2 bg-amber-950/70 backdrop-blur-md text-amber-50 text-[9px] font-medium px-2 py-0.5 rounded-full">
-                          {formatLabel(
-                            book.format
-                          )}
-                        </div>
-
-                        {book.volume && (
-                          <div className="absolute top-2 left-2 bg-amber-800 text-amber-50 text-[9px] font-bold px-2 py-0.5 rounded-full shadow">
-                            Vol.{' '}
-                            {
-                              book.volume
-                            }
+                          <div className="w-full h-full flex items-center justify-center">
+                            <Book />
                           </div>
                         )}
                       </div>
 
-                      <h4 className="font-serif font-bold text-xs text-amber-950 line-clamp-2">
+                      <h4 className="font-serif font-bold text-xs">
                         {
                           book.title
                         }
                       </h4>
 
-                      <p className="text-[10px] font-medium text-amber-800/60 mt-1">
-                        {book.publishYear
-                          ? `Anno: ${book.publishYear}`
-                          : ''}
+                      <p className="text-[10px] text-amber-800/60">
+                        {
+                          book.publishYear
+                        }
                       </p>
                     </div>
                   )
                 )}
-
               </div>
             </div>
           )}
         </div>
       )}
 
-      {/* =====================================================
+
+      {/* =================================================
           SETTINGS
-      ===================================================== */}
+      ================================================= */}
 
       {activeTab === 'settings' && (
         <div className="p-4 space-y-5 max-w-lg mx-auto">
 
-          <div className="bg-[#FFFDF9] rounded-3xl p-4 shadow-sm border border-amber-900/10 space-y-3">
+          <div className="bg-[#FFFDF9] rounded-3xl p-4 border border-amber-900/10 space-y-3">
 
-            <h2 className="text-xs font-bold text-amber-800/60 uppercase tracking-wider">
-              Esporta la tua Biblioteca
+            <h2 className="text-xs font-bold uppercase tracking-wider">
+              Esporta
             </h2>
 
             <button
               onClick={
                 exportToExcel
               }
-              className="w-full p-3 bg-emerald-50 text-emerald-900 rounded-2xl font-bold text-xs flex items-center gap-3 border border-emerald-200"
+              className="w-full p-3 bg-emerald-50 text-emerald-900 rounded-2xl font-bold text-xs flex items-center gap-3"
             >
-              <FileSpreadsheet className="w-5 h-5 text-emerald-700" />
-
-              Esporta in Foglio Excel (.xlsx)
+              <FileSpreadsheet />
+              Esporta Excel
             </button>
 
             <button
               onClick={
                 exportToPDF
               }
-              className="w-full p-3 bg-rose-50 text-rose-900 rounded-2xl font-bold text-xs flex items-center gap-3 border border-rose-200"
+              className="w-full p-3 bg-rose-50 text-rose-900 rounded-2xl font-bold text-xs flex items-center gap-3"
             >
-              <FileText className="w-5 h-5 text-rose-700" />
-
-              Esporta Report PDF
+              <FileText />
+              Esporta PDF
             </button>
           </div>
 
-          <div className="bg-[#FFFDF9] rounded-3xl p-4 shadow-sm border border-amber-900/10 space-y-3">
 
-            <h2 className="text-xs font-bold text-amber-800/60 uppercase tracking-wider">
-              Backup & Ripristino Dati
+          <div className="bg-[#FFFDF9] rounded-3xl p-4 border border-amber-900/10 space-y-3">
+
+            <h2 className="text-xs font-bold uppercase tracking-wider">
+              Backup
             </h2>
 
             <button
               onClick={
                 exportBackup
               }
-              className="w-full p-3 bg-amber-100/60 text-amber-950 rounded-2xl font-bold text-xs flex items-center gap-3 border border-amber-200"
+              className="w-full p-3 bg-amber-100 rounded-2xl font-bold text-xs flex items-center gap-3"
             >
-              <Download className="w-5 h-5 text-amber-800" />
-
-              Salva Backup Dati (JSON)
+              <Download />
+              Salva Backup JSON
             </button>
 
-            <label className="w-full p-3 bg-stone-100/80 text-stone-900 rounded-2xl font-bold text-xs flex items-center gap-3 border border-stone-200 cursor-pointer">
-              <Upload className="w-5 h-5 text-stone-700" />
-
-              Ripristina Backup da File
+            <label className="w-full p-3 bg-stone-100 rounded-2xl font-bold text-xs flex items-center gap-3 cursor-pointer">
+              <Upload />
+              Ripristina Backup
 
               <input
                 type="file"
@@ -2366,49 +2550,54 @@ export default function LibraryApp() {
             </label>
           </div>
 
-          <div className="bg-[#FFFDF9] rounded-3xl p-4 shadow-sm border border-amber-900/10 space-y-3">
 
-            <h2 className="text-xs font-bold text-rose-700 uppercase tracking-wider">
-              Zona Pericolo
-            </h2>
+          <div className="bg-[#FFFDF9] rounded-3xl p-4 border border-rose-200">
 
             <button
               onClick={
                 handleClearAll
               }
-              className="w-full p-3 bg-rose-700 text-amber-50 rounded-2xl font-bold text-xs flex items-center justify-center gap-2"
+              className="w-full p-3 bg-rose-700 text-white rounded-2xl font-bold text-xs flex items-center justify-center gap-2"
             >
               <Trash2 className="w-4 h-4" />
-
-              Cancella Intera Biblioteca
+              Cancella Intera
+              Biblioteca
             </button>
           </div>
         </div>
       )}
 
-      {/* =====================================================
+
+      {/* =================================================
           DETTAGLIO LIBRO
-      ===================================================== */}
+      ================================================= */}
 
       {selectedBookDetail && (
-        <div className="fixed inset-0 z-50 bg-amber-950/40 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+        <div className="fixed inset-0 z-50 bg-amber-950/40 backdrop-blur-sm flex items-end sm:items-center justify-center">
 
-          <div className="bg-[#FFFDF9] w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[90vh] overflow-y-auto p-6 space-y-4 shadow-2xl relative border border-amber-900/10">
+          <div className="bg-[#FFFDF9] w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[90vh] overflow-y-auto p-6 space-y-4">
 
-            <button
-              onClick={() =>
-                setSelectedBookDetail(
-                  null
-                )
-              }
-              className="absolute top-4 right-4 p-2 bg-amber-100/50 rounded-full text-amber-900"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            <div className="flex justify-between">
 
-            <div className="flex gap-4 items-start pt-2">
+              <h2 className="text-lg font-serif font-bold">
+                Scheda Libro
+              </h2>
 
-              <div className="w-24 h-36 bg-amber-100/40 rounded-xl overflow-hidden border border-amber-900/10 flex-shrink-0">
+              <button
+                onClick={() =>
+                  setSelectedBookDetail(
+                    null
+                  )
+                }
+              >
+                <X />
+              </button>
+            </div>
+
+
+            <div className="flex gap-4">
+
+              <div className="w-24 h-36 bg-amber-100 rounded-xl overflow-hidden flex-shrink-0">
 
                 {selectedBookDetail.coverUrl ? (
                   <img
@@ -2421,176 +2610,152 @@ export default function LibraryApp() {
                     className="w-full h-full object-cover"
                   />
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center text-amber-800/30">
-                    <Book className="w-8 h-8" />
+                  <div className="w-full h-full flex items-center justify-center">
+                    <Book />
                   </div>
                 )}
               </div>
 
-              <div className="flex-1">
 
-                <h2 className="text-lg font-serif font-bold text-amber-950 leading-tight">
+              <div>
+
+                <h2 className="font-serif font-bold">
                   {
                     selectedBookDetail.title
                   }
                 </h2>
 
-                <p className="text-xs font-medium text-amber-800/70 mt-1">
+                <p className="text-xs text-amber-800/70 mt-1">
                   {
                     selectedBookDetail.author
                   }
                 </p>
 
+                {selectedBookDetail.isbn && (
+                  <p className="text-[10px] mt-2">
+                    ISBN:{' '}
+                    {
+                      selectedBookDetail.isbn
+                    }
+                  </p>
+                )}
+
                 <div className="flex flex-wrap gap-2 mt-3">
 
-                  <span className="text-[10px] px-2.5 py-1 rounded-full bg-amber-100/70 text-amber-900 font-bold">
+                  <span className="text-[10px] px-2 py-1 rounded-full bg-amber-100 font-bold">
                     {formatLabel(
                       selectedBookDetail.format
                     )}
                   </span>
 
-                  {selectedBookDetail.isClassic && (
-                    <span className="text-[10px] px-2.5 py-1 rounded-full bg-amber-200/60 text-amber-950 font-bold">
-                      Classico
-                    </span>
-                  )}
-
-                  {selectedBookDetail.isRead ? (
-                    <span className="text-[10px] px-2.5 py-1 rounded-full bg-emerald-100/70 text-emerald-900 font-bold">
+                  {selectedBookDetail.isRead && (
+                    <span className="text-[10px] px-2 py-1 rounded-full bg-emerald-100 text-emerald-900 font-bold">
                       Letto
-                    </span>
-                  ) : (
-                    <span className="text-[10px] px-2.5 py-1 rounded-full bg-stone-200/70 text-stone-900 font-bold">
-                      In Biblioteca
                     </span>
                   )}
                 </div>
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 bg-amber-50/60 p-4 rounded-2xl text-xs text-amber-900">
+
+            <div className="grid grid-cols-2 gap-3 bg-amber-50 p-4 rounded-2xl text-xs">
 
               <div>
-                <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Paese di Pubblicazione:
+                <span className="text-[10px] text-amber-800/50 block">
+                  Editore
                 </span>
 
-                <span className="font-bold">
-                  {
-                    selectedBookDetail.publishCountry ||
-                    '-'
-                  }
-                </span>
-              </div>
-
-              <div>
-                <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Editore:
-                </span>
-
-                <span className="font-bold">
+                <b>
                   {
                     selectedBookDetail.publisher ||
                     '-'
                   }
-                </span>
+                </b>
               </div>
 
               <div>
-                <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Anno Pubblicazione:
+                <span className="text-[10px] text-amber-800/50 block">
+                  Anno
                 </span>
 
-                <span className="font-bold">
+                <b>
                   {
                     selectedBookDetail.publishYear ||
                     '-'
                   }
-                </span>
+                </b>
               </div>
 
               <div>
-                <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Pagine:
+                <span className="text-[10px] text-amber-800/50 block">
+                  Pagine
                 </span>
 
-                <span className="font-bold">
+                <b>
                   {
                     selectedBookDetail.pages ||
                     '-'
                   }
-                </span>
+                </b>
               </div>
 
               <div>
-                <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Genere:
+                <span className="text-[10px] text-amber-800/50 block">
+                  Genere
                 </span>
 
-                <span className="font-bold">
+                <b>
                   {
                     selectedBookDetail.genre ||
                     '-'
                   }
-                </span>
+                </b>
               </div>
 
               <div>
-                <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Serie / Tag:
+                <span className="text-[10px] text-amber-800/50 block">
+                  Serie
                 </span>
 
-                <span className="font-bold">
+                <b>
                   {
                     selectedBookDetail.seriesTag ||
                     '-'
                   }
-                </span>
+                </b>
               </div>
 
               <div>
-                <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Volume:
+                <span className="text-[10px] text-amber-800/50 block">
+                  Volume
                 </span>
 
-                <span className="font-bold">
+                <b>
                   {
                     selectedBookDetail.volume ||
                     '-'
                   }
-                </span>
-              </div>
-
-              <div>
-                <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  ISBN:
-                </span>
-
-                <span className="font-bold">
-                  {
-                    selectedBookDetail.isbn ||
-                    '-'
-                  }
-                </span>
+                </b>
               </div>
 
               {selectedBookDetail.isRead && (
                 <div className="col-span-2 border-t border-amber-900/10 pt-2">
-                  <span className="block text-amber-800/50 font-semibold text-[10px]">
-                    Mese & Anno di Lettura:
+                  <span className="text-[10px] text-amber-800/50 block">
+                    Data lettura
                   </span>
 
-                  <span className="font-bold">
+                  <b>
                     {
                       selectedBookDetail.readMonthYear ||
                       '-'
                     }
-                  </span>
+                  </b>
                 </div>
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-3 pt-2">
+
+            <div className="grid grid-cols-2 gap-3">
 
               <button
                 onClick={() =>
@@ -2598,10 +2763,9 @@ export default function LibraryApp() {
                     selectedBookDetail
                   )
                 }
-                className="py-3 bg-amber-800 text-amber-50 rounded-xl font-bold text-xs flex items-center justify-center gap-2"
+                className="py-3 bg-amber-800 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2"
               >
                 <Edit className="w-4 h-4" />
-
                 Modifica
               </button>
 
@@ -2611,96 +2775,124 @@ export default function LibraryApp() {
                     selectedBookDetail.id
                   )
                 }
-                className="py-3 bg-rose-100 text-rose-800 rounded-xl font-bold text-xs flex items-center justify-center gap-2 border border-rose-200"
+                className="py-3 bg-rose-100 text-rose-800 rounded-xl font-bold text-xs flex items-center justify-center gap-2"
               >
                 <Trash2 className="w-4 h-4" />
-
                 Elimina
               </button>
-
             </div>
           </div>
         </div>
       )}
 
-      {/* =====================================================
-          MODALE AGGIUNTA / MODIFICA
-      ===================================================== */}
+
+      {/* =================================================
+          MODALE AGGIUNTA
+      ================================================= */}
 
       {isAddModalOpen && (
-        <div className="fixed inset-0 z-50 bg-amber-950/40 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+        <div className="fixed inset-0 z-50 bg-amber-950/40 backdrop-blur-sm flex items-end sm:items-center justify-center">
 
-          <div className="bg-[#FFFDF9] w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto p-6 space-y-4 shadow-2xl relative border border-amber-900/10">
+          <div className="bg-[#FFFDF9] w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[94vh] overflow-y-auto p-6 space-y-4">
 
             <div className="flex justify-between items-center border-b border-amber-900/10 pb-3">
 
-              <h2 className="text-base font-serif font-bold text-amber-950">
+              <h2 className="text-base font-serif font-bold">
                 {formData.id
                   ? 'Modifica Libro'
                   : 'Aggiungi Nuovo Libro'}
               </h2>
 
               <button
-                onClick={() => {
-                  closeBarcodeScanner();
+                onClick={() =>
                   setIsAddModalOpen(
                     false
-                  );
-                }}
-                className="p-2 text-amber-800/40"
+                  )
+                }
               >
-                <X className="w-5 h-5" />
+                <X />
               </button>
             </div>
 
-            {/* =================================================
-                ISBN / SCANNER
-            ================================================= */}
 
-            <div className="bg-amber-100/50 p-3.5 rounded-2xl space-y-3 border border-amber-900/10">
+            {/* ===========================================
+                SCANNER
+            =========================================== */}
+
+            <div className="bg-amber-100/50 p-4 rounded-2xl border border-amber-900/10 space-y-3">
 
               <div className="flex justify-between items-center">
 
                 <div>
-                  <span className="text-[10px] font-bold text-amber-900 uppercase tracking-wider block">
-                    Compilazione Automatica
+                  <span className="text-[10px] font-bold uppercase tracking-wider">
+                    Scansione ISBN
                   </span>
 
-                  <span className="text-[10px] text-amber-800/60">
-                    Scansiona ISBN o inseriscilo manualmente
-                  </span>
+                  <p className="text-[10px] text-amber-800/60 mt-1">
+                    Usa la fotocamera
+                    posteriore del
+                    dispositivo.
+                  </p>
                 </div>
 
-                <Scan className="w-5 h-5 text-amber-800" />
+                <Scan className="w-5 h-5" />
               </div>
+
+
+              <button
+                type="button"
+                onClick={
+                  openScanner
+                }
+                className="w-full py-3 bg-amber-800 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2 active:scale-95"
+              >
+                <Camera className="w-4 h-4" />
+
+                Scansiona con
+                Fotocamera
+              </button>
+
+
+              <div className="text-center text-[10px] text-amber-800/50">
+                oppure inserisci
+                l'ISBN manualmente
+              </div>
+
 
               <div className="flex gap-2">
 
                 <input
                   type="text"
                   inputMode="numeric"
-                  placeholder="ISBN (es. 978880...)"
+                  autoComplete="off"
+                  placeholder="978..."
                   value={
                     isbnInput
                   }
-                  onChange={(e) =>
-                    setIsbnInput(
-                      e.target.value
-                    )
-                  }
-                  className="flex-1 min-w-0 p-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
-                />
+                  onChange={(
+                    event
+                  ) => {
+                    const value =
+                      event.target
+                        .value;
 
-                <button
-                  type="button"
-                  onClick={
-                    openBarcodeScanner
-                  }
-                  className="w-11 h-11 flex-shrink-0 bg-stone-800 text-white rounded-xl flex items-center justify-center active:scale-95 transition-transform"
-                  aria-label="Scansiona ISBN con fotocamera"
-                >
-                  <Scan className="w-5 h-5" />
-                </button>
+                    setIsbnInput(
+                      value
+                    );
+
+                    setFormData(
+                      (
+                        previous
+                      ) => ({
+                        ...previous,
+                        isbn: cleanISBN(
+                          value
+                        ),
+                      })
+                    );
+                  }}
+                  className="flex-1 p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl text-xs"
+                />
 
                 <button
                   type="button"
@@ -2710,23 +2902,19 @@ export default function LibraryApp() {
                   disabled={
                     isSearchingIsbn
                   }
-                  className="px-3 flex-shrink-0 bg-amber-800 text-amber-50 rounded-xl text-xs font-bold active:scale-95 transition-transform disabled:opacity-50"
+                  className="px-4 bg-amber-800 text-white rounded-xl text-xs font-bold disabled:opacity-50"
                 >
                   {isSearchingIsbn
                     ? '...'
                     : 'Cerca'}
                 </button>
-
               </div>
-
-              <p className="text-[10px] text-amber-800/60">
-                Tocca 📷 e inquadra il codice a barre sul retro del libro.
-              </p>
             </div>
 
-            {/* =================================================
+
+            {/* ===========================================
                 FORM
-            ================================================= */}
+            =========================================== */}
 
             <form
               onSubmit={
@@ -2742,16 +2930,22 @@ export default function LibraryApp() {
                   formData.title ||
                   ''
                 }
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    title: e.target
-                      .value,
-                  })
+                onChange={(
+                  event
+                ) =>
+                  setFormData(
+                    {
+                      ...formData,
+                      title:
+                        event.target
+                          .value,
+                    }
+                  )
                 }
-                className="w-full p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
+                className="w-full p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                 required
               />
+
 
               <div className="grid grid-cols-2 gap-2">
 
@@ -2762,53 +2956,69 @@ export default function LibraryApp() {
                     formData.author ||
                     ''
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      author:
-                        e.target.value,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        author:
+                          event.target
+                            .value,
+                      }
+                    )
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                   required
                 />
 
                 <input
                   type="text"
-                  placeholder="Paese di pubblicazione"
+                  placeholder="Paese"
                   value={
                     formData.publishCountry ||
                     ''
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      publishCountry:
-                        e.target
-                          .value,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        publishCountry:
+                          event
+                            .target
+                            .value,
+                      }
+                    )
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                 />
-
               </div>
+
 
               <input
                 type="text"
-                placeholder="URL Copertina Immagine"
+                placeholder="URL Copertina"
                 value={
                   formData.coverUrl ||
                   ''
                 }
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    coverUrl:
-                      e.target.value,
-                  })
+                onChange={(
+                  event
+                ) =>
+                  setFormData(
+                    {
+                      ...formData,
+                      coverUrl:
+                        event.target
+                          .value,
+                    }
+                  )
                 }
-                className="w-full p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                className="w-full p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
               />
+
 
               <div className="grid grid-cols-2 gap-2">
 
@@ -2819,34 +3029,46 @@ export default function LibraryApp() {
                     formData.publisher ||
                     ''
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      publisher:
-                        e.target.value,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        publisher:
+                          event
+                            .target
+                            .value,
+                      }
+                    )
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                 />
 
                 <input
                   type="text"
-                  placeholder="Anno Pubblicazione"
+                  placeholder="Anno"
                   value={
                     formData.publishYear ||
                     ''
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      publishYear:
-                        e.target.value,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        publishYear:
+                          event
+                            .target
+                            .value,
+                      }
+                    )
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                 />
-
               </div>
+
 
               <div className="grid grid-cols-2 gap-2">
 
@@ -2857,28 +3079,35 @@ export default function LibraryApp() {
                     formData.genre ||
                     ''
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      genre:
-                        e.target.value,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        genre:
+                          event
+                            .target
+                            .value,
+                      }
+                    )
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                 />
 
                 <input
                   type="text"
                   inputMode="numeric"
-                  pattern="[0-9]*"
-                  placeholder="Numero Pagine"
+                  placeholder="Pagine"
                   value={
                     formData.pages ||
                     ''
                   }
-                  onChange={(e) => {
+                  onChange={(
+                    event
+                  ) => {
                     const value =
-                      e.target.value.replace(
+                      event.target.value.replace(
                         /\D/g,
                         ''
                       );
@@ -2893,10 +3122,10 @@ export default function LibraryApp() {
                         : undefined,
                     });
                   }}
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                 />
-
               </div>
+
 
               <div className="grid grid-cols-2 gap-2">
 
@@ -2907,14 +3136,20 @@ export default function LibraryApp() {
                     formData.seriesTag ||
                     ''
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      seriesTag:
-                        e.target.value,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        seriesTag:
+                          event
+                            .target
+                            .value,
+                      }
+                    )
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                 />
 
                 <input
@@ -2924,23 +3159,29 @@ export default function LibraryApp() {
                     formData.volume ||
                     ''
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      volume:
-                        e.target.value,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        volume:
+                          event
+                            .target
+                            .value,
+                      }
+                    )
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
                 />
-
               </div>
+
 
               {/* CLASSICO */}
 
-              <div className="flex items-center justify-between p-3 bg-amber-50/60 rounded-xl border border-amber-900/10">
+              <label className="flex items-center justify-between p-3 bg-amber-50 rounded-xl border border-amber-900/10 cursor-pointer">
 
-                <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                <span className="font-bold flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-amber-600" />
                   È un Classico?
                 </span>
@@ -2950,23 +3191,30 @@ export default function LibraryApp() {
                   checked={
                     !!formData.isClassic
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      isClassic:
-                        e.target.checked,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        isClassic:
+                          event
+                            .target
+                            .checked,
+                      }
+                    )
                   }
                   className="w-5 h-5 accent-amber-800"
                 />
-              </div>
+              </label>
+
 
               {/* FORMATO */}
 
-              <div className="p-3 bg-amber-50/60 rounded-xl space-y-2 border border-amber-900/10">
+              <div className="p-3 bg-amber-50 rounded-xl border border-amber-900/10 space-y-2">
 
-                <span className="font-bold text-amber-950 block">
-                  Formato:
+                <span className="font-bold">
+                  Formato
                 </span>
 
                 <div className="flex gap-2">
@@ -2974,17 +3222,19 @@ export default function LibraryApp() {
                   <button
                     type="button"
                     onClick={() =>
-                      setFormData({
-                        ...formData,
-                        format:
-                          'cartaceo',
-                      })
+                      setFormData(
+                        {
+                          ...formData,
+                          format:
+                            'cartaceo',
+                        }
+                      )
                     }
-                    className={`flex-1 py-2 rounded-lg text-xs font-bold transition-colors ${
+                    className={`flex-1 py-2 rounded-lg font-bold ${
                       formData.format ===
                       'cartaceo'
-                        ? 'bg-amber-800 text-amber-50'
-                        : 'bg-[#FFFDF9] border border-amber-900/10 text-amber-900'
+                        ? 'bg-amber-800 text-white'
+                        : 'bg-white border'
                     }`}
                   >
                     Cartaceo
@@ -2993,64 +3243,68 @@ export default function LibraryApp() {
                   <button
                     type="button"
                     onClick={() =>
-                      setFormData({
-                        ...formData,
-                        format:
-                          'ebook',
-                      })
+                      setFormData(
+                        {
+                          ...formData,
+                          format:
+                            'ebook',
+                        }
+                      )
                     }
-                    className={`flex-1 py-2 rounded-lg text-xs font-bold transition-colors ${
+                    className={`flex-1 py-2 rounded-lg font-bold ${
                       formData.format ===
                         'ebook' ||
                       formData.format ===
                         'ebook_and_paper'
-                        ? 'bg-amber-800 text-amber-50'
-                        : 'bg-[#FFFDF9] border border-amber-900/10 text-amber-900'
+                        ? 'bg-amber-800 text-white'
+                        : 'bg-white border'
                     }`}
                   >
                     eBook
                   </button>
-
                 </div>
 
                 {(formData.format ===
                   'ebook' ||
                   formData.format ===
                     'ebook_and_paper') && (
-                  <label className="flex items-center gap-2 pt-1 cursor-pointer">
-
+                  <label className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       checked={
                         formData.format ===
                         'ebook_and_paper'
                       }
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          format:
-                            e.target
-                              .checked
-                              ? 'ebook_and_paper'
-                              : 'ebook',
-                        })
+                      onChange={(
+                        event
+                      ) =>
+                        setFormData(
+                          {
+                            ...formData,
+                            format:
+                              event
+                                .target
+                                .checked
+                                ? 'ebook_and_paper'
+                                : 'ebook',
+                          }
+                        )
                       }
-                      className="w-4 h-4 accent-amber-800"
                     />
 
-                    <span className="text-[11px] font-medium text-amber-900">
-                      Acquistato anche in formato Cartaceo
-                    </span>
-
+                    Acquistato anche
+                    in formato
+                    Cartaceo
                   </label>
                 )}
               </div>
 
+
               {/* LETTO */}
 
-              <div className="flex items-center justify-between p-3 bg-amber-50/60 rounded-xl border border-amber-900/10">
+              <label className="flex items-center justify-between p-3 bg-amber-50 rounded-xl border border-amber-900/10 cursor-pointer">
 
-                <span className="font-bold text-amber-950">
+                <span className="font-bold">
                   Letto
                 </span>
 
@@ -3059,246 +3313,248 @@ export default function LibraryApp() {
                   checked={
                     !!formData.isRead
                   }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      isRead:
-                        e.target.checked,
-                    })
+                  onChange={(
+                    event
+                  ) =>
+                    setFormData(
+                      {
+                        ...formData,
+                        isRead:
+                          event
+                            .target
+                            .checked,
+                      }
+                    )
                   }
                   className="w-5 h-5 accent-amber-800"
                 />
+              </label>
 
-              </div>
 
               {/* DATA LETTURA */}
 
               {formData.isRead && (
-                <div className="p-3 bg-amber-100/40 border border-amber-900/10 rounded-xl space-y-2">
+                <div className="p-3 bg-amber-100/40 rounded-xl space-y-2">
 
-                  <span className="font-bold text-amber-950 block text-[11px] uppercase tracking-wider">
+                  <span className="font-bold">
                     Data di Lettura
                   </span>
 
                   <div className="grid grid-cols-2 gap-2">
 
-                    <div>
-                      <label className="block text-[10px] text-amber-800/70 font-semibold mb-1">
-                        Mese:
-                      </label>
-
-                      <select
-                        value={
-                          formData.readMonth ||
-                          'Gennaio'
-                        }
-                        onChange={(e) =>
-                          setFormData({
+                    <select
+                      value={
+                        formData.readMonth ||
+                        'Gennaio'
+                      }
+                      onChange={(
+                        event
+                      ) =>
+                        setFormData(
+                          {
                             ...formData,
                             readMonth:
-                              e.target
+                              event
+                                .target
                                 .value,
-                          })
-                        }
-                        className="w-full p-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-semibold text-amber-950 focus:outline-none"
-                      >
-                        {MONTHS.map(
-                          (
-                            month
-                          ) => (
-                            <option
-                              key={
-                                month
-                              }
-                              value={
-                                month
-                              }
-                            >
-                              {
-                                month
-                              }
-                            </option>
-                          )
-                        )}
-                      </select>
-                    </div>
+                          }
+                        )
+                      }
+                      className="p-3 bg-white border rounded-xl"
+                    >
+                      {MONTHS.map(
+                        (
+                          month
+                        ) => (
+                          <option
+                            key={
+                              month
+                            }
+                            value={
+                              month
+                            }
+                          >
+                            {
+                              month
+                            }
+                          </option>
+                        )
+                      )}
+                    </select>
 
-                    <div>
-                      <label className="block text-[10px] text-amber-800/70 font-semibold mb-1">
-                        Anno:
-                      </label>
-
-                      <select
-                        value={
-                          formData.readYear ||
-                          currentYearNum
-                        }
-                        onChange={(e) =>
-                          setFormData({
+                    <select
+                      value={
+                        formData.readYear ||
+                        currentYearNum
+                      }
+                      onChange={(
+                        event
+                      ) =>
+                        setFormData(
+                          {
                             ...formData,
                             readYear:
                               parseInt(
-                                e.target
+                                event
+                                  .target
                                   .value,
                                 10
                               ),
-                          })
-                        }
-                        className="w-full p-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-semibold text-amber-950 focus:outline-none"
-                      >
-                        {yearsList.map(
-                          (
-                            year
-                          ) => (
-                            <option
-                              key={
-                                year
-                              }
-                              value={
-                                year
-                              }
-                            >
-                              {
-                                year
-                              }
-                            </option>
-                          )
-                        )}
-                      </select>
-                    </div>
-
+                          }
+                        )
+                      }
+                      className="p-3 bg-white border rounded-xl"
+                    >
+                      {yearsList.map(
+                        (
+                          year
+                        ) => (
+                          <option
+                            key={
+                              year
+                            }
+                            value={
+                              year
+                            }
+                          >
+                            {
+                              year
+                            }
+                          </option>
+                        )
+                      )}
+                    </select>
                   </div>
                 </div>
               )}
 
-              {/* SALVA */}
 
               <button
                 type="submit"
-                className="w-full py-3 bg-amber-800 text-amber-50 rounded-xl font-bold text-xs shadow-md active:scale-95 transition-transform"
+                className="w-full py-3 bg-amber-800 text-white rounded-xl font-bold shadow-md active:scale-95"
               >
                 {formData.id
                   ? 'Aggiorna Libro'
                   : 'Salva Libro'}
               </button>
-
             </form>
           </div>
         </div>
       )}
 
-      {/* =====================================================
-          MODALE SCANNER
-      ===================================================== */}
+
+      {/* =================================================
+          MODALE FOTOCAMERA
+      ================================================= */}
 
       {isScannerOpen && (
         <div className="fixed inset-0 z-[100] bg-black flex flex-col">
 
-          <div className="relative flex-1 flex items-center justify-center overflow-hidden">
+          <div className="flex items-center justify-between p-4 text-white">
 
-            <video
-              ref={videoRef}
-              muted
-              playsInline
-              autoPlay
-              className="absolute inset-0 w-full h-full object-cover"
-            />
+            <div>
+              <h2 className="font-serif font-bold text-lg">
+                Scansiona ISBN
+              </h2>
 
-            {/* MASCHERA */}
-
-            <div className="absolute inset-0 pointer-events-none">
-
-              <div className="absolute inset-0 bg-black/25" />
-
-              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[86%] max-w-md h-36">
-
-                <div className="absolute inset-0 border-2 border-white rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.30)]" />
-
-                <div className="absolute left-2 right-2 top-1/2 h-0.5 bg-red-500 shadow-lg shadow-red-500/60" />
-
-              </div>
-            </div>
-
-            {/* TESTO SUPERIORE */}
-
-            <div className="absolute top-8 left-0 right-0 text-center px-6">
-
-              <p className="text-white font-bold text-lg drop-shadow-lg">
-                Inquadra il codice ISBN
+              <p className="text-xs text-white/60">
+                Posiziona il codice
+                al centro
               </p>
-
-              <p className="text-white/80 text-xs mt-1">
-                Posiziona il codice a barre dentro il riquadro
-              </p>
-
             </div>
-
-            {/* STATO */}
-
-            {!isScanning &&
-              !scannerError && (
-                <div className="absolute bottom-28 left-0 right-0 text-center">
-
-                  <div className="inline-flex items-center gap-2 bg-black/60 text-white px-4 py-3 rounded-2xl text-xs">
-
-                    <span className="w-2 h-2 bg-amber-400 rounded-full animate-pulse" />
-
-                    Avvio fotocamera...
-                  </div>
-                </div>
-              )}
-
-            {isScanning && (
-              <div className="absolute bottom-28 left-0 right-0 text-center">
-
-                <div className="inline-flex items-center gap-2 bg-black/60 text-white px-4 py-3 rounded-2xl text-xs">
-
-                  <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-
-                  Ricerca del codice...
-                </div>
-              </div>
-            )}
-
-            {/* ERRORE */}
-
-            {scannerError && (
-              <div className="absolute bottom-28 left-5 right-5 bg-white rounded-2xl p-4 shadow-xl">
-
-                <p className="text-sm font-bold text-rose-800">
-                  Fotocamera non disponibile
-                </p>
-
-                <p className="text-xs text-stone-600 mt-1">
-                  {
-                    scannerError
-                  }
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* FOOTER SCANNER */}
-
-          <div className="bg-black p-5 pb-8">
 
             <button
-              type="button"
               onClick={
-                closeBarcodeScanner
+                stopScanner
               }
-              className="w-full py-3.5 bg-white text-black rounded-2xl font-bold text-sm active:scale-95 transition-transform"
+              className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center"
             >
-              Chiudi scanner
+              <X />
             </button>
+          </div>
 
+
+          <div className="flex-1 flex items-center justify-center relative overflow-hidden">
+
+            <video
+              ref={
+                scannerVideoRef
+              }
+              autoPlay
+              muted
+              playsInline
+              className="w-full h-full object-cover"
+            />
+
+
+            {/* RETTANGOLO DI SCANSIONE */}
+
+            <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 h-32 border-2 border-white rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]">
+
+              <div className="absolute left-0 right-0 top-1/2 h-0.5 bg-red-500 shadow-lg" />
+            </div>
+
+
+            {/* MESSAGGIO */}
+
+            <div className="absolute bottom-8 left-4 right-4">
+
+              <div className="bg-black/70 backdrop-blur-md rounded-2xl p-4 text-white text-center">
+
+                {scannerError ? (
+                  <div className="text-red-300 text-xs flex items-center justify-center gap-2">
+                    <AlertCircle className="w-4 h-4" />
+
+                    {scannerError}
+                  </div>
+                ) : (
+                  <div className="text-xs flex items-center justify-center gap-2">
+
+                    {!scannerLockedRef.current && (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    )}
+
+                    {
+                      scannerStatus
+                    }
+                  </div>
+                )}
+
+              </div>
+            </div>
+          </div>
+
+
+          <div className="p-5 bg-black text-white text-center">
+
+            <p className="text-[11px] text-white/60">
+              Suggerimento: usa la
+              fotocamera posteriore e
+              avvicinati lentamente al
+              codice a barre.
+            </p>
+
+            {scannerError && (
+              <button
+                onClick={() => {
+                  setScannerError(
+                    ''
+                  );
+                  startScanner();
+                }}
+                className="mt-3 px-5 py-2.5 bg-white text-black rounded-xl text-xs font-bold"
+              >
+                Riprova
+              </button>
+            )}
           </div>
         </div>
       )}
 
-      {/* =====================================================
+
+      {/* =================================================
           TAB BAR
-      ===================================================== */}
+      ================================================= */}
 
       <nav className="fixed bottom-0 left-0 right-0 z-30 bg-[#FBF9F5]/90 backdrop-blur-md border-t border-amber-900/10 flex justify-around py-2.5 max-w-lg mx-auto">
 
@@ -3315,18 +3571,17 @@ export default function LibraryApp() {
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab ===
-            'home'
+            activeTab === 'home'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
         >
           <Home className="w-5 h-5" />
-
           <span className="text-[10px] font-bold">
             Home
           </span>
         </button>
+
 
         <button
           onClick={() => {
@@ -3338,18 +3593,17 @@ export default function LibraryApp() {
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab ===
-            'read'
+            activeTab === 'read'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
         >
           <BookOpen className="w-5 h-5" />
-
           <span className="text-[10px] font-bold">
             Letti
           </span>
         </button>
+
 
         <button
           onClick={() => {
@@ -3361,8 +3615,7 @@ export default function LibraryApp() {
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab ===
-            'authors'
+            activeTab === 'authors'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
@@ -3374,6 +3627,7 @@ export default function LibraryApp() {
           </span>
         </button>
 
+
         <button
           onClick={() => {
             setActiveTab(
@@ -3384,8 +3638,7 @@ export default function LibraryApp() {
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab ===
-            'settings'
+            activeTab === 'settings'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
