@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Home,
   BookOpen,
@@ -9,7 +9,6 @@ import {
   Plus,
   Search,
   Scan,
-  Camera,
   Trash2,
   Edit,
   Download,
@@ -30,7 +29,6 @@ import {
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { BrowserMultiFormatReader } from '@zxing/library';
 
 // --- INTERFACCIA DATI LIBRO ---
 export interface BookItem {
@@ -73,11 +71,6 @@ export default function LibraryApp() {
   const [selectedAuthor, setSelectedAuthor] = useState<string | null>(null);
   const [homeSubView, setHomeSubView] = useState<'none' | 'classics' | 'genres'>('none');
   const [selectedGenreHome, setSelectedGenreHome] = useState<string | null>(null);
-
-  // Scanner Fotocamera
-  const [isScanningCamera, setIsScanningCamera] = useState(false);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
 
   // Drag & Drop State (Sezione Letti)
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
@@ -140,48 +133,6 @@ export default function LibraryApp() {
       localStorage.setItem('ios_library_books_v5', JSON.stringify(books));
     }
   }, [books, isLoaded]);
-
-  // Gestione spegnimento fotocamera alla chiusura modale
-  useEffect(() => {
-    if (!isAddModalOpen && isScanningCamera) {
-      stopCameraScan();
-    }
-  }, [isAddModalOpen]);
-
-  const startCameraScan = async () => {
-    setIsScanningCamera(true);
-    codeReaderRef.current = new BrowserMultiFormatReader();
-    try {
-      const videoInputDevices = await codeReaderRef.current.listVideoInputDevices();
-      const selectedDeviceId = videoInputDevices.length > 0 ? videoInputDevices[0].deviceId : undefined;
-      
-      if (videoRef.current) {
-        codeReaderRef.current.decodeFromVideoDevice(
-          selectedDeviceId,
-          videoRef.current,
-          (result) => {
-            if (result) {
-              const scannedIsbn = result.getText();
-              setIsbnInput(scannedIsbn);
-              stopCameraScan();
-              handleSearchBookByISBN(scannedIsbn);
-            }
-          }
-        );
-      }
-    } catch (err) {
-      console.error(err);
-      alert('Impossibile accedere alla fotocamera. Controlla i permessi del browser.');
-      setIsScanningCamera(false);
-    }
-  };
-
-  const stopCameraScan = () => {
-    if (codeReaderRef.current) {
-      codeReaderRef.current.reset();
-    }
-    setIsScanningCamera(false);
-  };
 
   // Statistiche Totali Biblioteca
   const totalBooks = books.length;
@@ -307,7 +258,6 @@ export default function LibraryApp() {
       notes: '',
     });
     setIsbnInput('');
-    stopCameraScan();
   };
 
   const handleEditBook = (book: BookItem) => {
@@ -1105,10 +1055,7 @@ export default function LibraryApp() {
                 {formData.id ? 'Modifica Libro' : 'Aggiungi Nuovo Libro'}
               </h2>
               <button
-                onClick={() => {
-                  stopCameraScan();
-                  setIsAddModalOpen(false);
-                }}
+                onClick={() => setIsAddModalOpen(false)}
                 className="p-2 text-amber-800/40"
               >
                 <X className="w-5 h-5" />
@@ -1123,31 +1070,11 @@ export default function LibraryApp() {
                 <Scan className="w-4 h-4 text-amber-800" />
               </div>
 
-              {isScanningCamera ? (
-                <div className="relative rounded-xl overflow-hidden bg-black aspect-video flex items-center justify-center">
-                  <video ref={videoRef} className="w-full h-full object-cover" />
-                  <button
-                    type="button"
-                    onClick={stopCameraScan}
-                    className="absolute bottom-2 px-3 py-1 bg-rose-600 text-white text-[11px] font-bold rounded-lg shadow"
-                  >
-                    Chiudi Fotocamera
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={startCameraScan}
-                  className="w-full py-2.5 bg-amber-800 text-amber-50 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-sm active:scale-95 transition-transform"
-                >
-                  <Camera className="w-4 h-4" /> Scansiona con Fotocamera
-                </button>
-              )}
-
               <div className="flex gap-2">
                 <input
                   type="text"
-                  placeholder="O inserisci codice ISBN manualmente"
+                  inputMode="numeric"
+                  placeholder="Inserisci codice ISBN (es. 97888...)"
                   value={isbnInput}
                   onChange={(e) => setIsbnInput(e.target.value)}
                   className="flex-1 p-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-xl text-xs font-medium focus:outline-none"

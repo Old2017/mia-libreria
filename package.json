@@ -9,7 +9,6 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@zxing/library": "^0.21.3",
     "jspdf": "^2.5.1",
     "jspdf-autotable": "^3.8.2",
     "lucide-react": "^1.16.0",
@@ -17,5 +16,13 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^8",
+    "eslint-config-next": "15.1.0",
+    "typescript": "^5"
   }
 }
