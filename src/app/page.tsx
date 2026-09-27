@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Home,
   BookOpen,
@@ -9,6 +9,7 @@ import {
   Plus,
   Search,
   Scan,
+  Camera,
   Trash2,
   Edit,
   Download,
@@ -23,13 +24,13 @@ import {
   FileText,
   Calendar,
   GripVertical,
-  Bookmark,
   Layers,
   Sparkles
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { BrowserMultiFormatReader } from '@zxing/library';
 
 // --- INTERFACCIA DATI LIBRO ---
 export interface BookItem {
@@ -72,6 +73,11 @@ export default function LibraryApp() {
   const [selectedAuthor, setSelectedAuthor] = useState<string | null>(null);
   const [homeSubView, setHomeSubView] = useState<'none' | 'classics' | 'genres'>('none');
   const [selectedGenreHome, setSelectedGenreHome] = useState<string | null>(null);
+
+  // Scanner Fotocamera
+  const [isScanningCamera, setIsScanningCamera] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
 
   // Drag & Drop State (Sezione Letti)
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
@@ -134,6 +140,48 @@ export default function LibraryApp() {
       localStorage.setItem('ios_library_books_v5', JSON.stringify(books));
     }
   }, [books, isLoaded]);
+
+  // Gestione spegnimento fotocamera alla chiusura modale
+  useEffect(() => {
+    if (!isAddModalOpen && isScanningCamera) {
+      stopCameraScan();
+    }
+  }, [isAddModalOpen]);
+
+  const startCameraScan = async () => {
+    setIsScanningCamera(true);
+    codeReaderRef.current = new BrowserMultiFormatReader();
+    try {
+      const videoInputDevices = await codeReaderRef.current.listVideoInputDevices();
+      const selectedDeviceId = videoInputDevices.length > 0 ? videoInputDevices[0].deviceId : undefined;
+      
+      if (videoRef.current) {
+        codeReaderRef.current.decodeFromVideoDevice(
+          selectedDeviceId,
+          videoRef.current,
+          (result) => {
+            if (result) {
+              const scannedIsbn = result.getText();
+              setIsbnInput(scannedIsbn);
+              stopCameraScan();
+              handleSearchBookByISBN(scannedIsbn);
+            }
+          }
+        );
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Impossibile accedere alla fotocamera. Controlla i permessi del browser.');
+      setIsScanningCamera(false);
+    }
+  };
+
+  const stopCameraScan = () => {
+    if (codeReaderRef.current) {
+      codeReaderRef.current.reset();
+    }
+    setIsScanningCamera(false);
+  };
 
   // Statistiche Totali Biblioteca
   const totalBooks = books.length;
@@ -259,6 +307,7 @@ export default function LibraryApp() {
       notes: '',
     });
     setIsbnInput('');
+    stopCameraScan();
   };
 
   const handleEditBook = (book: BookItem) => {
@@ -496,7 +545,7 @@ export default function LibraryApp() {
 
   return (
     <div className="min-h-screen bg-[#FBF9F5] text-amber-950 font-sans pb-24 select-none">
-      {/* Header Stile Reading Friendly */}
+      {/* Header pulito: tasto + presente SOLO nella seconda tab ("read") */}
       <header className="sticky top-0 z-20 bg-[#FBF9F5]/90 backdrop-blur-md border-b border-amber-900/10 px-5 py-3.5 flex justify-between items-center">
         <div>
           <span className="text-[11px] font-bold text-amber-800/70 uppercase tracking-widest block">
@@ -513,7 +562,7 @@ export default function LibraryApp() {
           </h1>
         </div>
 
-        {activeTab !== 'home' && (
+        {activeTab === 'read' && (
           <button
             onClick={() => {
               resetForm();
@@ -589,7 +638,6 @@ export default function LibraryApp() {
             </div>
           ) : (
             <>
-              {/* Card Anno In Corso con Formattazione Richiesta */}
               <div className="bg-[#FFFDF9] rounded-3xl p-5 shadow-sm border border-amber-900/10 space-y-3">
                 <div className="flex items-center gap-4">
                   <div className="w-12 h-12 rounded-2xl bg-amber-800 text-amber-50 flex items-center justify-center shadow-md flex-shrink-0">
@@ -610,9 +658,7 @@ export default function LibraryApp() {
                 </div>
               </div>
 
-              {/* Grid Statistiche Principali (In Biblioteca e Libri Letti) */}
               <div className="grid grid-cols-2 gap-3.5">
-                {/* Totale Biblioteca */}
                 <div className="bg-[#FFFDF9] p-4 rounded-3xl shadow-sm border border-amber-900/10 flex flex-col justify-between min-h-[9rem]">
                   <div className="w-10 h-10 rounded-2xl bg-amber-100/70 text-amber-900 flex items-center justify-center">
                     <BookOpen className="w-5 h-5" />
@@ -628,7 +674,6 @@ export default function LibraryApp() {
                   </div>
                 </div>
 
-                {/* Libri Letti Totali */}
                 <div className="bg-[#FFFDF9] p-4 rounded-3xl shadow-sm border border-amber-900/10 flex flex-col justify-between min-h-[9rem]">
                   <div className="w-10 h-10 rounded-2xl bg-emerald-100/70 text-emerald-800 flex items-center justify-center">
                     <CheckCircle2 className="w-5 h-5" />
@@ -645,7 +690,6 @@ export default function LibraryApp() {
                 </div>
               </div>
 
-              {/* CARDS CATEGORIE INTERATTIVE */}
               <div className="space-y-3 pt-2">
                 <h2 className="text-xs font-bold text-amber-800/60 uppercase tracking-wider px-1">
                   Esplora Categorie
@@ -1060,22 +1104,50 @@ export default function LibraryApp() {
               <h2 className="text-base font-serif font-bold text-amber-950">
                 {formData.id ? 'Modifica Libro' : 'Aggiungi Nuovo Libro'}
               </h2>
-              <button onClick={() => setIsAddModalOpen(false)} className="p-2 text-amber-800/40">
+              <button
+                onClick={() => {
+                  stopCameraScan();
+                  setIsAddModalOpen(false);
+                }}
+                className="p-2 text-amber-800/40"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="bg-amber-100/50 p-3.5 rounded-2xl space-y-2.5 border border-amber-900/10">
+            <div className="bg-amber-100/50 p-3.5 rounded-2xl space-y-3 border border-amber-900/10">
               <div className="flex justify-between items-center">
                 <span className="text-[10px] font-bold text-amber-900 uppercase tracking-wider">
-                  Compilazione Automatica da Codice a Barre / ISBN
+                  Compilazione Automatica (Codice ISBN)
                 </span>
                 <Scan className="w-4 h-4 text-amber-800" />
               </div>
+
+              {isScanningCamera ? (
+                <div className="relative rounded-xl overflow-hidden bg-black aspect-video flex items-center justify-center">
+                  <video ref={videoRef} className="w-full h-full object-cover" />
+                  <button
+                    type="button"
+                    onClick={stopCameraScan}
+                    className="absolute bottom-2 px-3 py-1 bg-rose-600 text-white text-[11px] font-bold rounded-lg shadow"
+                  >
+                    Chiudi Fotocamera
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={startCameraScan}
+                  className="w-full py-2.5 bg-amber-800 text-amber-50 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-sm active:scale-95 transition-transform"
+                >
+                  <Camera className="w-4 h-4" /> Scansiona con Fotocamera
+                </button>
+              )}
+
               <div className="flex gap-2">
                 <input
                   type="text"
-                  placeholder="Scansiona o inserisci codice ISBN"
+                  placeholder="O inserisci codice ISBN manualmente"
                   value={isbnInput}
                   onChange={(e) => setIsbnInput(e.target.value)}
                   className="flex-1 p-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-xl text-xs font-medium focus:outline-none"
