@@ -24,14 +24,22 @@ import {
   GripVertical,
   Layers,
   Sparkles,
+  Camera,
+  RotateCcw,
+  Zap,
+  ZapOff,
+  AlertCircle,
+  Loader2,
 } from 'lucide-react';
+
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { Html5Qrcode } from 'html5-qrcode';
 
-/* ============================================================
-   TIPI
-============================================================ */
+// ============================================================
+// INTERFACCIA DATI LIBRO
+// ============================================================
 
 export interface BookItem {
   id: string;
@@ -72,43 +80,552 @@ const MONTHS = [
   'Dicembre',
 ];
 
-/* ============================================================
-   TIPI BARCODE DETECTOR
-   Evita errori TypeScript nei progetti dove lib.dom
-   non contiene BarcodeDetector.
-============================================================ */
+// ============================================================
+// COMPONENTE SCANNER ISBN
+// ============================================================
 
-interface DetectedBarcode {
-  rawValue?: string;
+interface ISBNScannerProps {
+  onDetected: (isbn: string) => void;
+  onClose: () => void;
 }
 
-interface BarcodeDetectorInstance {
-  detect(
-    source: HTMLVideoElement
-  ): Promise<DetectedBarcode[]>;
+function ISBNScanner({ onDetected, onClose }: ISBNScannerProps) {
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const startingRef = useRef(false);
+  const detectedRef = useRef(false);
+
+  const [scannerStarted, setScannerStarted] = useState(false);
+  const [scannerError, setScannerError] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [cameraFacing, setCameraFacing] = useState<'environment' | 'user'>(
+    'environment'
+  );
+
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+
+  const scannerElementId = 'isbn-reader';
+
+  // ----------------------------------------------------------
+  // Ferma scanner
+  // ----------------------------------------------------------
+
+  const stopScanner = async () => {
+    const scanner = scannerRef.current;
+
+    if (!scanner) return;
+
+    try {
+      const state = scanner.getState();
+
+      // 2 = SCANNING
+      // 3 = PAUSED
+      if (state === 2 || state === 3) {
+        await scanner.stop();
+      }
+    } catch (error) {
+      console.warn('Errore arrestando lo scanner:', error);
+    }
+
+    try {
+      scanner.clear();
+    } catch (error) {
+      console.warn('Errore clear scanner:', error);
+    }
+
+    scannerRef.current = null;
+    setScannerStarted(false);
+  };
+
+  // ----------------------------------------------------------
+  // Normalizza ISBN
+  // ----------------------------------------------------------
+
+  const normalizeISBN = (value: string): string => {
+    return value.replace(/[^0-9Xx]/g, '').toUpperCase();
+  };
+
+  // ----------------------------------------------------------
+  // Verifica ISBN-13
+  // ----------------------------------------------------------
+
+  const isValidISBN13 = (isbn: string): boolean => {
+    const clean = normalizeISBN(isbn);
+
+    if (!/^\d{13}$/.test(clean)) {
+      return false;
+    }
+
+    let sum = 0;
+
+    for (let i = 0; i < 12; i++) {
+      const digit = Number(clean[i]);
+      sum += i % 2 === 0 ? digit : digit * 3;
+    }
+
+    const checkDigit = (10 - (sum % 10)) % 10;
+
+    return checkDigit === Number(clean[12]);
+  };
+
+  // ----------------------------------------------------------
+  // Controlla supporto torcia
+  // ----------------------------------------------------------
+
+  const checkTorchSupport = () => {
+    try {
+      const video = document.querySelector(
+        '#isbn-reader video'
+      ) as HTMLVideoElement | null;
+
+      const stream = video?.srcObject as MediaStream | null;
+
+      const track = stream?.getVideoTracks?.()[0];
+
+      if (!track) {
+        setTorchSupported(false);
+        return;
+      }
+
+      const capabilities = track.getCapabilities?.();
+
+      if (capabilities && 'torch' in capabilities) {
+        setTorchSupported(true);
+      } else {
+        setTorchSupported(false);
+      }
+    } catch {
+      setTorchSupported(false);
+    }
+  };
+
+  // ----------------------------------------------------------
+  // Torcia
+  // ----------------------------------------------------------
+
+  const toggleTorch = async () => {
+    try {
+      const video = document.querySelector(
+        '#isbn-reader video'
+      ) as HTMLVideoElement | null;
+
+      const stream = video?.srcObject as MediaStream | null;
+
+      const track = stream?.getVideoTracks?.()[0];
+
+      if (!track) return;
+
+      await track.applyConstraints({
+        advanced: [{ torch: !torchOn } as MediaTrackConstraintSet],
+      });
+
+      setTorchOn(!torchOn);
+    } catch (error) {
+      console.warn('Torcia non disponibile:', error);
+      setTorchSupported(false);
+    }
+  };
+
+  // ----------------------------------------------------------
+  // Avvia scanner
+  // ----------------------------------------------------------
+
+  const startScanner = async () => {
+    if (startingRef.current) return;
+
+    startingRef.current = true;
+    detectedRef.current = false;
+
+    setScannerError('');
+    setIsLoading(true);
+
+    try {
+      if (typeof window === 'undefined') {
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Controllo HTTPS
+      // ------------------------------------------------------
+
+      const isLocalhost =
+        window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1';
+
+      if (!window.isSecureContext && !isLocalhost) {
+        setScannerError(
+          'La fotocamera richiede HTTPS. Apri questa applicazione tramite un indirizzo https://.'
+        );
+
+        setIsLoading(false);
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Controllo getUserMedia
+      // ------------------------------------------------------
+
+      if (
+        !navigator.mediaDevices ||
+        !navigator.mediaDevices.getUserMedia
+      ) {
+        setScannerError(
+          'Safari non permette di accedere alla fotocamera da questa pagina. Controlla che il sito sia aperto tramite HTTPS.'
+        );
+
+        setIsLoading(false);
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Piccolo delay: necessario affinché il DOM del modal
+      // sia disponibile
+      // ------------------------------------------------------
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      // ------------------------------------------------------
+      // Istanza scanner
+      // ------------------------------------------------------
+
+      const scanner = new Html5Qrcode(scannerElementId);
+
+      scannerRef.current = scanner;
+
+      // ------------------------------------------------------
+      // Configurazione
+      // ------------------------------------------------------
+
+      const config = {
+        fps: 10,
+
+        qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
+          const width = Math.min(
+            Math.floor(viewfinderWidth * 0.85),
+            420
+          );
+
+          const height = Math.min(
+            Math.floor(viewfinderHeight * 0.35),
+            180
+          );
+
+          return {
+            width,
+            height,
+          };
+        },
+
+        aspectRatio: 1.7777778,
+
+        formatsToSupport: [
+          // EAN-13 = ISBN-13
+          0,
+        ],
+      };
+
+      // ------------------------------------------------------
+      // Avvio
+      // ------------------------------------------------------
+
+      await scanner.start(
+        {
+          facingMode: cameraFacing,
+        },
+        config,
+
+        async (decodedText) => {
+          if (detectedRef.current) {
+            return;
+          }
+
+          const cleanCode = normalizeISBN(decodedText);
+
+          // --------------------------------------------------
+          // Lo scanner può leggere anche altri codici.
+          // Accettiamo solo ISBN-13.
+          // --------------------------------------------------
+
+          if (!/^97\d{11}$/.test(cleanCode)) {
+            return;
+          }
+
+          if (!isValidISBN13(cleanCode)) {
+            return;
+          }
+
+          detectedRef.current = true;
+
+          if (navigator.vibrate) {
+            navigator.vibrate(100);
+          }
+
+          await stopScanner();
+
+          onDetected(cleanCode);
+        },
+
+        () => {
+          // Non facciamo nulla sugli errori di singolo frame.
+          // html5-qrcode genera moltissimi errori durante la
+          // normale ricerca del codice.
+        }
+      );
+
+      setScannerStarted(true);
+      setIsLoading(false);
+
+      // ------------------------------------------------------
+      // Aspettiamo che il video venga creato
+      // ------------------------------------------------------
+
+      setTimeout(() => {
+        checkTorchSupport();
+      }, 800);
+    } catch (error: any) {
+      console.error('Errore avvio scanner:', error);
+
+      let message =
+        'Impossibile accedere alla fotocamera.';
+
+      if (error?.name === 'NotAllowedError') {
+        message =
+          'Accesso alla fotocamera negato. Su iPhone vai in Impostazioni > Safari > Fotocamera e consenti l’accesso.';
+      } else if (error?.name === 'NotFoundError') {
+        message =
+          'Nessuna fotocamera disponibile sul dispositivo.';
+      } else if (error?.name === 'NotReadableError') {
+        message =
+          'La fotocamera è già utilizzata da un’altra applicazione o scheda.';
+      } else if (error?.name === 'OverconstrainedError') {
+        message =
+          'La fotocamera richiesta non è disponibile. Prova a riaprire lo scanner.';
+      } else if (
+        String(error?.message || '')
+          .toLowerCase()
+          .includes('permission')
+      ) {
+        message =
+          'Safari non ha concesso l’accesso alla fotocamera.';
+      }
+
+      setScannerError(message);
+      setIsLoading(false);
+
+      await stopScanner();
+    } finally {
+      startingRef.current = false;
+    }
+  };
+
+  // ----------------------------------------------------------
+  // Cambio fotocamera
+  // ----------------------------------------------------------
+
+  const switchCamera = async () => {
+    const newFacing =
+      cameraFacing === 'environment' ? 'user' : 'environment';
+
+    await stopScanner();
+
+    setTorchOn(false);
+    setCameraFacing(newFacing);
+
+    setTimeout(() => {
+      startScanner();
+    }, 250);
+  };
+
+  // ----------------------------------------------------------
+  // Mount
+  // ----------------------------------------------------------
+
+  useEffect(() => {
+    startScanner();
+
+    return () => {
+      stopScanner();
+    };
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ----------------------------------------------------------
+  // Chiusura scanner
+  // ----------------------------------------------------------
+
+  const handleClose = async () => {
+    await stopScanner();
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black flex flex-col">
+      {/* HEADER */}
+
+      <div className="absolute top-0 left-0 right-0 z-20 bg-gradient-to-b from-black/80 to-transparent px-5 pt-12 pb-8">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-serif font-bold text-white">
+              Scansiona ISBN
+            </h2>
+
+            <p className="text-[11px] text-white/70 mt-1">
+              Inquadra il codice a barre sul retro del libro
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleClose}
+            className="w-10 h-10 rounded-full bg-white/15 backdrop-blur-md flex items-center justify-center text-white"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+
+      {/* CAMERA */}
+
+      <div className="flex-1 flex items-center justify-center bg-black relative overflow-hidden">
+        <div
+          id={scannerElementId}
+          className="w-full h-full"
+        />
+
+        {/* Overlay centrale */}
+
+        {!scannerError && (
+          <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+            <div className="relative w-[88%] max-w-[430px] h-[190px]">
+              {/* angoli */}
+
+              <div className="absolute top-0 left-0 w-10 h-10 border-t-4 border-l-4 border-amber-400 rounded-tl-2xl" />
+
+              <div className="absolute top-0 right-0 w-10 h-10 border-t-4 border-r-4 border-amber-400 rounded-tr-2xl" />
+
+              <div className="absolute bottom-0 left-0 w-10 h-10 border-b-4 border-l-4 border-amber-400 rounded-bl-2xl" />
+
+              <div className="absolute bottom-0 right-0 w-10 h-10 border-b-4 border-r-4 border-amber-400 rounded-br-2xl" />
+
+              {/* linea scanner */}
+
+              {scannerStarted && (
+                <div className="absolute left-5 right-5 top-1/2 h-0.5 bg-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.9)] animate-pulse" />
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Loading */}
+
+        {isLoading && !scannerError && (
+          <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+            <div className="bg-black/70 backdrop-blur-md rounded-2xl px-5 py-4 flex items-center gap-3">
+              <Loader2 className="w-5 h-5 text-amber-400 animate-spin" />
+
+              <span className="text-white text-xs font-semibold">
+                Avvio fotocamera...
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Errore */}
+
+        {scannerError && (
+          <div className="absolute inset-0 flex items-center justify-center p-6">
+            <div className="bg-[#FFFDF9] rounded-3xl p-6 max-w-sm w-full shadow-2xl">
+              <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-700 flex items-center justify-center mx-auto mb-4">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+
+              <h3 className="text-base font-serif font-bold text-amber-950 text-center">
+                Fotocamera non disponibile
+              </h3>
+
+              <p className="text-xs text-amber-900/70 text-center mt-2 leading-relaxed">
+                {scannerError}
+              </p>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setScannerError('');
+                  startScanner();
+                }}
+                className="w-full mt-5 py-3 bg-amber-800 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2"
+              >
+                <RotateCcw className="w-4 h-4" />
+                Riprova
+              </button>
+
+              <button
+                type="button"
+                onClick={handleClose}
+                className="w-full mt-2 py-3 bg-amber-100 text-amber-950 rounded-xl text-xs font-bold"
+              >
+                Inserisci ISBN manualmente
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* CONTROLLI */}
+
+      <div className="absolute bottom-0 left-0 right-0 z-20 bg-gradient-to-t from-black/90 via-black/70 to-transparent px-5 pt-10 pb-10">
+        <p className="text-center text-white/80 text-xs font-medium mb-5">
+          Cerca un codice ISBN-13 che inizi con 978 o 979
+        </p>
+
+        <div className="flex items-center justify-center gap-4">
+          {/* Torcia */}
+
+          {torchSupported && (
+            <button
+              type="button"
+              onClick={toggleTorch}
+              className="w-12 h-12 rounded-full bg-white/15 backdrop-blur-md flex items-center justify-center text-white"
+            >
+              {torchOn ? (
+                <ZapOff className="w-5 h-5" />
+              ) : (
+                <Zap className="w-5 h-5" />
+              )}
+            </button>
+          )}
+
+          {/* Switch camera */}
+
+          <button
+            type="button"
+            onClick={switchCamera}
+            className="w-14 h-14 rounded-full bg-white text-amber-950 flex items-center justify-center shadow-xl"
+          >
+            <RotateCcw className="w-6 h-6" />
+          </button>
+
+          {/* Chiudi */}
+
+          <button
+            type="button"
+            onClick={handleClose}
+            className="w-12 h-12 rounded-full bg-white/15 backdrop-blur-md flex items-center justify-center text-white"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-interface BarcodeDetectorConstructor {
-  new (options?: {
-    formats?: string[];
-  }): BarcodeDetectorInstance;
-}
-
-declare global {
-  interface Window {
-    BarcodeDetector?: BarcodeDetectorConstructor;
-  }
-}
-
-/* ============================================================
-   COMPONENTE
-============================================================ */
+// ============================================================
+// APP PRINCIPALE
+// ============================================================
 
 export default function LibraryApp() {
-  /* ------------------------------------------------------------
-     NAVIGAZIONE
-  ------------------------------------------------------------ */
-
   const [activeTab, setActiveTab] = useState<
     'home' | 'read' | 'authors' | 'settings'
   >('home');
@@ -116,11 +633,14 @@ export default function LibraryApp() {
   const [books, setBooks] = useState<BookItem[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
 
-  /* ------------------------------------------------------------
-     MODALI
-  ------------------------------------------------------------ */
+  // ----------------------------------------------------------
+  // Modali
+  // ----------------------------------------------------------
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+
   const [selectedBookDetail, setSelectedBookDetail] =
     useState<BookItem | null>(null);
 
@@ -134,45 +654,25 @@ export default function LibraryApp() {
   const [selectedGenreHome, setSelectedGenreHome] =
     useState<string | null>(null);
 
-  /* ------------------------------------------------------------
-     DRAG & DROP
-  ------------------------------------------------------------ */
+  // ----------------------------------------------------------
+  // Drag
+  // ----------------------------------------------------------
 
   const [draggedIndex, setDraggedIndex] =
     useState<number | null>(null);
 
-  /* ------------------------------------------------------------
-     ISBN MANUALE / API
-  ------------------------------------------------------------ */
+  // ----------------------------------------------------------
+  // ISBN
+  // ----------------------------------------------------------
 
   const [isbnInput, setIsbnInput] = useState('');
+
   const [isSearchingIsbn, setIsSearchingIsbn] =
     useState(false);
 
-  /* ------------------------------------------------------------
-     CAMERA / SCANNER
-  ------------------------------------------------------------ */
-
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-
-  const [isCameraScannerOpen, setIsCameraScannerOpen] =
-    useState(false);
-
-  const [isCameraScanning, setIsCameraScanning] =
-    useState(false);
-
-  const [cameraError, setCameraError] = useState('');
-
-  const [cameraStream, setCameraStream] =
-    useState<MediaStream | null>(null);
-
-  const cameraStreamRef = useRef<MediaStream | null>(null);
-
-  const scannerRunningRef = useRef(false);
-
-  /* ------------------------------------------------------------
-     FILTRI
-  ------------------------------------------------------------ */
+  // ----------------------------------------------------------
+  // Filtri
+  // ----------------------------------------------------------
 
   const [filterGenre, setFilterGenre] =
     useState<string>('all');
@@ -186,9 +686,9 @@ export default function LibraryApp() {
   const [searchQuery, setSearchQuery] =
     useState('');
 
-  /* ------------------------------------------------------------
-     ANNI
-  ------------------------------------------------------------ */
+  // ----------------------------------------------------------
+  // Anni
+  // ----------------------------------------------------------
 
   const currentYearNum = new Date().getFullYear();
 
@@ -204,9 +704,9 @@ export default function LibraryApp() {
     (_, i) => currentYearNum - i
   );
 
-  /* ------------------------------------------------------------
-     FORM
-  ------------------------------------------------------------ */
+  // ----------------------------------------------------------
+  // Form
+  // ----------------------------------------------------------
 
   const [formData, setFormData] =
     useState<Partial<BookItem>>({
@@ -230,9 +730,9 @@ export default function LibraryApp() {
       isbn: '',
     });
 
-  /* ============================================================
-     STORAGE
-  ============================================================ */
+  // ==========================================================
+  // CARICAMENTO
+  // ==========================================================
 
   useEffect(() => {
     const saved = localStorage.getItem(
@@ -242,10 +742,10 @@ export default function LibraryApp() {
     if (saved) {
       try {
         setBooks(JSON.parse(saved));
-      } catch (error) {
+      } catch (e) {
         console.error(
           'Errore caricamento storage',
-          error
+          e
         );
       }
     }
@@ -253,180 +753,112 @@ export default function LibraryApp() {
     setIsLoaded(true);
   }, []);
 
-  useEffect(() => {
-    if (!isLoaded) return;
+  // ==========================================================
+  // SALVATAGGIO
+  // ==========================================================
 
-    localStorage.setItem(
-      'ios_library_books_v5',
-      JSON.stringify(books)
-    );
+  useEffect(() => {
+    if (isLoaded) {
+      localStorage.setItem(
+        'ios_library_books_v5',
+        JSON.stringify(books)
+      );
+    }
   }, [books, isLoaded]);
 
-  /* ============================================================
-     STOP CAMERA
-  ============================================================ */
+  // ==========================================================
+  // STATISTICHE
+  // ==========================================================
 
-  const stopCameraScanner = () => {
-    scannerRunningRef.current = false;
+  const totalBooks = books.length;
 
-    const stream = cameraStreamRef.current;
+  const totalCartacei = books.filter(
+    (b) =>
+      b.format === 'cartaceo' ||
+      b.format === 'ebook_and_paper'
+  ).length;
 
-    if (stream) {
-      stream.getTracks().forEach((track) => {
-        track.stop();
-      });
-    }
+  const totalEbook = books.filter(
+    (b) =>
+      b.format === 'ebook' ||
+      b.format === 'ebook_and_paper'
+  ).length;
 
-    cameraStreamRef.current = null;
-    setCameraStream(null);
+  const readBooks = books.filter(
+    (b) => b.isRead
+  );
 
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.srcObject = null;
-    }
+  const readBooksCount = readBooks.length;
 
-    setIsCameraScanning(false);
-    setIsCameraScannerOpen(false);
-  };
+  const readCartacei = readBooks.filter(
+    (b) =>
+      b.format === 'cartaceo' ||
+      b.format === 'ebook_and_paper'
+  ).length;
 
-  /* ============================================================
-     CLEANUP CAMERA
-  ============================================================ */
+  const readEbook = readBooks.filter(
+    (b) =>
+      b.format === 'ebook' ||
+      b.format === 'ebook_and_paper'
+  ).length;
 
-  useEffect(() => {
-    return () => {
-      const stream = cameraStreamRef.current;
+  const readThisYearBooks = books.filter(
+    (b) => {
+      if (!b.isRead) return false;
 
-      if (stream) {
-        stream.getTracks().forEach((track) => {
-          track.stop();
-        });
+      if (b.readYear) {
+        return b.readYear === currentYearNum;
       }
 
-      cameraStreamRef.current = null;
-    };
-  }, []);
+      if (
+        b.readMonthYear &&
+        b.readMonthYear.includes(
+          currentYearNum.toString()
+        )
+      ) {
+        return true;
+      }
 
-  /* ============================================================
-     AVVIO FOTOCAMERA
-  ============================================================ */
-
-  const startCameraScanner = async () => {
-    setCameraError('');
-
-    if (
-      typeof navigator === 'undefined' ||
-      !navigator.mediaDevices?.getUserMedia
-    ) {
-      setCameraError(
-        'La fotocamera non è disponibile in questo browser.'
-      );
-      setIsCameraScannerOpen(true);
-      return;
+      return false;
     }
+  );
 
-    if (
-      typeof window === 'undefined' ||
-      !window.BarcodeDetector
-    ) {
-      setCameraError(
-        'Questo browser non supporta la scansione automatica dei codici a barre. Inserisci l’ISBN manualmente.'
-      );
-      setIsCameraScannerOpen(true);
-      return;
-    }
+  const readThisYearCount =
+    readThisYearBooks.length;
 
-    try {
-      const stream =
-        await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: {
-              ideal: 'environment',
-            },
-            width: {
-              ideal: 1280,
-            },
-            height: {
-              ideal: 720,
-            },
-          },
-          audio: false,
-        });
+  const readThisYearCartacei =
+    readThisYearBooks.filter(
+      (b) =>
+        b.format === 'cartaceo' ||
+        b.format === 'ebook_and_paper'
+    ).length;
 
-      cameraStreamRef.current = stream;
-      setCameraStream(stream);
+  const readThisYearEbook =
+    readThisYearBooks.filter(
+      (b) =>
+        b.format === 'ebook' ||
+        b.format === 'ebook_and_paper'
+    ).length;
 
-      setIsCameraScannerOpen(true);
-      setIsCameraScanning(true);
-
-      scannerRunningRef.current = true;
-
-      setTimeout(() => {
-        if (!videoRef.current) return;
-
-        videoRef.current.srcObject = stream;
-
-        videoRef.current
-          .play()
-          .catch((error) => {
-            console.error(
-              'Errore avvio video:',
-              error
-            );
-          });
-      }, 100);
-    } catch (error) {
-      console.error(
-        'Errore accesso fotocamera:',
-        error
-      );
-
-      setCameraError(
-        'Non è stato possibile accedere alla fotocamera. Controlla i permessi del browser.'
-      );
-
-      setIsCameraScannerOpen(true);
-    }
-  };
-
-  /* ============================================================
-     RICERCA GOOGLE BOOKS
-  ============================================================ */
+  // ==========================================================
+  // GOOGLE BOOKS
+  // ==========================================================
 
   const handleSearchBookByISBN = async (
     codeToSearch?: string
   ) => {
     const query = (
       codeToSearch || isbnInput
-    )
-      .replace(/[^0-9Xx]/g, '')
-      .trim();
+    ).replace(/[^0-9Xx]/g, '');
 
     if (!query) {
-      alert('Inserisci o scansiona un codice ISBN.');
-      return;
-    }
-
-    if (
-      query.length !== 10 &&
-      query.length !== 13
-    ) {
-      alert(
-        'L’ISBN deve contenere 10 oppure 13 caratteri.'
-      );
+      alert('Inserisci un codice ISBN.');
       return;
     }
 
     setIsSearchingIsbn(true);
 
     try {
-      /*
-       * Chiamata diretta a Google Books.
-       *
-       * Se preferisci passare da una API Route Next.js,
-       * trovi la versione consigliata più sotto.
-       */
-
       const res = await fetch(
         `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(
           query
@@ -435,222 +867,126 @@ export default function LibraryApp() {
 
       if (!res.ok) {
         throw new Error(
-          `Google Books HTTP ${res.status}`
+          `HTTP ${res.status}`
         );
       }
 
       const data = await res.json();
 
       if (
-        !data.items ||
-        data.items.length === 0
+        data.items &&
+        data.items.length > 0
       ) {
+        const info =
+          data.items[0].volumeInfo;
+
+        const image =
+          info.imageLinks?.thumbnail ||
+          info.imageLinks?.smallThumbnail ||
+          '';
+
+        setFormData((prev) => ({
+          ...prev,
+
+          title:
+            info.title ||
+            prev.title ||
+            '',
+
+          author:
+            info.authors?.join(', ') ||
+            prev.author ||
+            '',
+
+          publisher:
+            info.publisher ||
+            prev.publisher ||
+            '',
+
+          publishYear:
+            info.publishedDate
+              ? info.publishedDate.substring(
+                  0,
+                  4
+                )
+              : prev.publishYear || '',
+
+          pages:
+            info.pageCount ||
+            prev.pages ||
+            undefined,
+
+          genre:
+            info.categories?.[0] ||
+            prev.genre ||
+            '',
+
+          coverUrl:
+            image
+              ? image.replace(
+                  'http:',
+                  'https:'
+                )
+              : prev.coverUrl || '',
+
+          isbn: query,
+        }));
+
+        setIsbnInput(query);
+      } else {
         alert(
-          'Nessun libro trovato per questo ISBN. Puoi inserire i dati manualmente.'
+          'Nessun dato trovato per questo ISBN. Puoi compilare i dettagli manualmente.'
         );
-        return;
+
+        setIsbnInput(query);
+
+        setFormData((prev) => ({
+          ...prev,
+          isbn: query,
+        }));
       }
-
-      const info =
-        data.items[0]?.volumeInfo || {};
-
-      const cover =
-        info.imageLinks?.thumbnail ||
-        info.imageLinks?.smallThumbnail ||
-        '';
-
-      setFormData((prev) => ({
-        ...prev,
-
-        title:
-          info.title ||
-          prev.title ||
-          '',
-
-        author: info.authors
-          ? info.authors.join(', ')
-          : prev.author || '',
-
-        publisher:
-          info.publisher ||
-          prev.publisher ||
-          '',
-
-        publishYear:
-          info.publishedDate
-            ? info.publishedDate.substring(0, 4)
-            : prev.publishYear || '',
-
-        pages:
-          info.pageCount ||
-          prev.pages ||
-          undefined,
-
-        genre:
-          info.categories?.[0] ||
-          prev.genre ||
-          '',
-
-        coverUrl:
-          cover.replace(
-            'http:',
-            'https:'
-          ) ||
-          prev.coverUrl ||
-          '',
-
-        isbn: query,
-      }));
-
-      setIsbnInput(query);
-    } catch (error) {
+    } catch (err) {
       console.error(
         'Errore Google Books:',
-        error
+        err
       );
 
       alert(
-        'Errore durante la ricerca online. Puoi compilare i campi manualmente.'
+        'Errore durante la ricerca online. Controlla la connessione e riprova.'
       );
     } finally {
       setIsSearchingIsbn(false);
     }
   };
 
-  /* ============================================================
-     SCANSIONE BARCODE
-  ============================================================ */
+  // ==========================================================
+  // ISBN SCANSIONATO
+  // ==========================================================
 
-  useEffect(() => {
-    if (
-      !isCameraScanning ||
-      !isCameraScannerOpen ||
-      !videoRef.current ||
-      !window.BarcodeDetector
-    ) {
-      return;
-    }
+  const handleISBNDetected = async (
+    isbn: string
+  ) => {
+    setIsScannerOpen(false);
 
-    const detector =
-      new window.BarcodeDetector({
-        formats: [
-          'ean_13',
-          'ean_8',
-        ],
-      });
+    setIsbnInput(isbn);
 
-    let animationFrame = 0;
-    let cancelled = false;
+    setFormData((prev) => ({
+      ...prev,
+      isbn,
+    }));
 
-    const scan = async () => {
-      if (
-        cancelled ||
-        !scannerRunningRef.current ||
-        !videoRef.current
-      ) {
-        return;
-      }
+    // Aspettiamo un istante per chiudere
+    // correttamente la fotocamera
+    await new Promise((resolve) =>
+      setTimeout(resolve, 150)
+    );
 
-      try {
-        const barcodes =
-          await detector.detect(
-            videoRef.current
-          );
-
-        if (barcodes.length > 0) {
-          const rawValue =
-            barcodes[0]?.rawValue || '';
-
-          const isbn = rawValue.replace(
-            /[^0-9Xx]/g,
-            ''
-          );
-
-          if (
-            isbn.length === 10 ||
-            isbn.length === 13
-          ) {
-            cancelled = true;
-            scannerRunningRef.current = false;
-
-            stopCameraScanner();
-
-            setIsbnInput(isbn);
-
-            await handleSearchBookByISBN(
-              isbn
-            );
-
-            return;
-          }
-        }
-      } catch (error) {
-        console.error(
-          'Errore durante scansione:',
-          error
-        );
-      }
-
-      if (
-        !cancelled &&
-        scannerRunningRef.current
-      ) {
-        animationFrame =
-          requestAnimationFrame(scan);
-      }
-    };
-
-    scan();
-
-    return () => {
-      cancelled = true;
-
-      if (animationFrame) {
-        cancelAnimationFrame(
-          animationFrame
-        );
-      }
-    };
-  }, [
-    isCameraScanning,
-    isCameraScannerOpen,
-  ]);
-
-  /* ============================================================
-     FORM RESET
-  ============================================================ */
-
-  const resetForm = () => {
-    stopCameraScanner();
-
-    setFormData({
-      title: '',
-      author: '',
-      publishCountry: '',
-      coverUrl: '',
-      publisher: '',
-      publishYear: '',
-      pages: undefined,
-      genre: '',
-      seriesTag: '',
-      volume: '',
-      isClassic: false,
-      format: 'cartaceo',
-      isRead: false,
-      readMonth: 'Gennaio',
-      readYear: currentYearNum,
-      rating: 5,
-      notes: '',
-      isbn: '',
-    });
-
-    setIsbnInput('');
-    setCameraError('');
+    await handleSearchBookByISBN(isbn);
   };
 
-  /* ============================================================
-     SALVA / MODIFICA LIBRO
-  ============================================================ */
+  // ==========================================================
+  // SALVA LIBRO
+  // ==========================================================
 
   const handleSaveBook = (
     e: React.FormEvent
@@ -664,6 +1000,7 @@ export default function LibraryApp() {
       alert(
         'Inserisci almeno Titolo e Autore.'
       );
+
       return;
     }
 
@@ -699,7 +1036,8 @@ export default function LibraryApp() {
         Number(formData.pages) ||
         undefined,
 
-      genre: formData.genre || '',
+      genre:
+        formData.genre || '',
 
       seriesTag:
         formData.seriesTag || '',
@@ -735,9 +1073,7 @@ export default function LibraryApp() {
         formData.notes || '',
 
       isbn:
-        formData.isbn ||
-        isbnInput ||
-        '',
+        formData.isbn || '',
 
       createdAt:
         formData.createdAt ||
@@ -745,42 +1081,77 @@ export default function LibraryApp() {
     };
 
     if (formData.id) {
-      setBooks((prev) =>
-        prev.map((book) =>
-          book.id === formData.id
+      setBooks((currentBooks) =>
+        currentBooks.map((b) =>
+          b.id === formData.id
             ? newBook
-            : book
+            : b
         )
       );
     } else {
-      setBooks((prev) => [
+      setBooks((currentBooks) => [
         newBook,
-        ...prev,
+        ...currentBooks,
       ]);
     }
 
     setIsAddModalOpen(false);
+
     setSelectedBookDetail(null);
 
     resetForm();
   };
 
-  /* ============================================================
-     MODIFICA
-  ============================================================ */
+  // ==========================================================
+  // RESET
+  // ==========================================================
+
+  const resetForm = () => {
+    setFormData({
+      title: '',
+      author: '',
+      publishCountry: '',
+      coverUrl: '',
+      publisher: '',
+      publishYear: '',
+      pages: undefined,
+      genre: '',
+      seriesTag: '',
+      volume: '',
+      isClassic: false,
+      format: 'cartaceo',
+      isRead: false,
+      readMonth: 'Gennaio',
+      readYear: currentYearNum,
+      rating: 5,
+      notes: '',
+      isbn: '',
+    });
+
+    setIsbnInput('');
+  };
+
+  // ==========================================================
+  // MODIFICA
+  // ==========================================================
 
   const handleEditBook = (
     book: BookItem
   ) => {
     setFormData(book);
-    setIsbnInput(book.isbn || '');
+
+    setIsbnInput(
+      book.isbn || ''
+    );
+
     setSelectedBookDetail(null);
+
     setIsAddModalOpen(true);
   };
 
-  /* ============================================================
-     ELIMINA
-  ============================================================ */
+  // ==========================================================
+  // ELIMINA
+  // ==========================================================
 
   const handleDeleteBook = (
     id: string
@@ -790,9 +1161,9 @@ export default function LibraryApp() {
         'Sei sicuro di voler eliminare questo libro?'
       )
     ) {
-      setBooks((prev) =>
-        prev.filter(
-          (book) => book.id !== id
+      setBooks((currentBooks) =>
+        currentBooks.filter(
+          (b) => b.id !== id
         )
       );
 
@@ -804,9 +1175,9 @@ export default function LibraryApp() {
     }
   };
 
-  /* ============================================================
-     DRAG & DROP
-  ============================================================ */
+  // ==========================================================
+  // DRAG
+  // ==========================================================
 
   const handleDragStart = (
     index: number
@@ -829,7 +1200,7 @@ export default function LibraryApp() {
 
     const readOnlyBooks =
       books.filter(
-        (book) => book.isRead
+        (b) => b.isRead
       );
 
     const itemToMove =
@@ -841,19 +1212,15 @@ export default function LibraryApp() {
 
     const sourceGlobalIdx =
       updated.findIndex(
-        (book) =>
-          book.id === itemToMove.id
+        (b) =>
+          b.id === itemToMove.id
       );
-
-    const targetBook =
-      readOnlyBooks[index];
-
-    if (!targetBook) return;
 
     const targetGlobalIdx =
       updated.findIndex(
-        (book) =>
-          book.id === targetBook.id
+        (b) =>
+          b.id ===
+          readOnlyBooks[index].id
       );
 
     if (
@@ -875,6 +1242,7 @@ export default function LibraryApp() {
     );
 
     setDraggedIndex(index);
+
     setBooks(updated);
   };
 
@@ -882,47 +1250,45 @@ export default function LibraryApp() {
     setDraggedIndex(null);
   };
 
-  /* ============================================================
-     EXPORT EXCEL
-  ============================================================ */
+  // ==========================================================
+  // EXPORT EXCEL
+  // ==========================================================
 
   const exportToExcel = () => {
     const dataToExport =
-      books.map((book) => ({
-        Titolo: book.title,
-        Autore: book.author,
+      books.map((b) => ({
+        Titolo: b.title,
+        Autore: b.author,
         'Paese di Pubblicazione':
-          book.publishCountry || '-',
-        Classico: book.isClassic
-          ? 'Sì'
-          : 'No',
-        Stato: book.isRead
-          ? 'Letto'
-          : 'In Biblioteca',
+          b.publishCountry || '-',
+        Classico:
+          b.isClassic ? 'Sì' : 'No',
+        Stato:
+          b.isRead
+            ? 'Letto'
+            : 'In Biblioteca',
         Formato:
-          book.format ===
-          'cartaceo'
+          b.format === 'cartaceo'
             ? 'Cartaceo'
-            : book.format ===
-                'ebook'
-              ? 'eBook'
-              : 'eBook + Cartaceo',
+            : b.format === 'ebook'
+            ? 'eBook'
+            : 'eBook + Cartaceo',
         Editore:
-          book.publisher,
+          b.publisher,
         'Anno Pubblicazione':
-          book.publishYear,
+          b.publishYear,
         Genere:
-          book.genre,
+          b.genre,
         'Serie / Tag':
-          book.seriesTag,
+          b.seriesTag,
         Volume:
-          book.volume || '-',
+          b.volume || '-',
         Pagine:
-          book.pages,
+          b.pages,
         'Mese e Anno di Lettura':
-          book.readMonthYear,
+          b.readMonthYear,
         ISBN:
-          book.isbn,
+          b.isbn,
       }));
 
     const worksheet =
@@ -945,9 +1311,9 @@ export default function LibraryApp() {
     );
   };
 
-  /* ============================================================
-     EXPORT PDF
-  ============================================================ */
+  // ==========================================================
+  // EXPORT PDF
+  // ==========================================================
 
   const exportToPDF = () => {
     const doc = new jsPDF();
@@ -959,27 +1325,21 @@ export default function LibraryApp() {
     );
 
     const tableData =
-      books.map((book) => [
-        book.title,
-        book.author,
-        book.publishCountry ||
-          '-',
-        book.isClassic
-          ? 'Sì'
-          : 'No',
-        book.isRead
+      books.map((b) => [
+        b.title,
+        b.author,
+        b.publishCountry || '-',
+        b.isClassic ? 'Sì' : 'No',
+        b.isRead
           ? 'Letto'
           : 'In Libreria',
-        book.format ===
-        'cartaceo'
+        b.format === 'cartaceo'
           ? 'Cartaceo'
-          : book.format ===
-              'ebook'
-            ? 'eBook'
-            : 'eBook + Cartaceo',
-        book.genre || '-',
-        book.readMonthYear ||
-          '-',
+          : b.format === 'ebook'
+          ? 'eBook'
+          : 'eBook + Cartaceo',
+        b.genre || '-',
+        b.readMonthYear || '-',
       ]);
 
     autoTable(doc, {
@@ -1004,9 +1364,9 @@ export default function LibraryApp() {
     );
   };
 
-  /* ============================================================
-     BACKUP
-  ============================================================ */
+  // ==========================================================
+  // BACKUP
+  // ==========================================================
 
   const exportBackup = () => {
     const dataStr =
@@ -1037,9 +1397,9 @@ export default function LibraryApp() {
     downloadAnchor.remove();
   };
 
-  /* ============================================================
-     IMPORT BACKUP
-  ============================================================ */
+  // ==========================================================
+  // IMPORT BACKUP
+  // ==========================================================
 
   const handleImportBackup = (
     e: React.ChangeEvent<HTMLInputElement>
@@ -1062,13 +1422,10 @@ export default function LibraryApp() {
         try {
           const parsed =
             JSON.parse(
-              event.target
-                ?.result as string
+              event.target?.result as string
             );
 
-          if (
-            Array.isArray(parsed)
-          ) {
+          if (Array.isArray(parsed)) {
             setBooks(parsed);
 
             alert(
@@ -1084,9 +1441,9 @@ export default function LibraryApp() {
     }
   };
 
-  /* ============================================================
-     CANCELLA TUTTO
-  ============================================================ */
+  // ==========================================================
+  // CANCELLA TUTTO
+  // ==========================================================
 
   const handleClearAll = () => {
     if (
@@ -1102,117 +1459,21 @@ export default function LibraryApp() {
     }
   };
 
-  /* ============================================================
-     STATISTICHE
-  ============================================================ */
-
-  const totalBooks = books.length;
-
-  const totalCartacei =
-    books.filter(
-      (book) =>
-        book.format ===
-          'cartaceo' ||
-        book.format ===
-          'ebook_and_paper'
-    ).length;
-
-  const totalEbook =
-    books.filter(
-      (book) =>
-        book.format ===
-          'ebook' ||
-        book.format ===
-          'ebook_and_paper'
-    ).length;
-
-  const readBooks =
-    books.filter(
-      (book) => book.isRead
-    );
-
-  const readBooksCount =
-    readBooks.length;
-
-  const readCartacei =
-    readBooks.filter(
-      (book) =>
-        book.format ===
-          'cartaceo' ||
-        book.format ===
-          'ebook_and_paper'
-    ).length;
-
-  const readEbook =
-    readBooks.filter(
-      (book) =>
-        book.format ===
-          'ebook' ||
-        book.format ===
-          'ebook_and_paper'
-    ).length;
-
-  const readThisYearBooks =
-    books.filter((book) => {
-      if (!book.isRead)
-        return false;
-
-      if (book.readYear) {
-        return (
-          book.readYear ===
-          currentYearNum
-        );
-      }
-
-      if (
-        book.readMonthYear &&
-        book.readMonthYear.includes(
-          currentYearNum.toString()
-        )
-      ) {
-        return true;
-      }
-
-      return false;
-    });
-
-  const readThisYearCount =
-    readThisYearBooks.length;
-
-  const readThisYearCartacei =
-    readThisYearBooks.filter(
-      (book) =>
-        book.format ===
-          'cartaceo' ||
-        book.format ===
-          'ebook_and_paper'
-    ).length;
-
-  const readThisYearEbook =
-    readThisYearBooks.filter(
-      (book) =>
-        book.format ===
-          'ebook' ||
-        book.format ===
-          'ebook_and_paper'
-    ).length;
-
-  /* ============================================================
-     FILTRI LIBRI LETTI
-  ============================================================ */
+  // ==========================================================
+  // FILTRI LIBRI LETTI
+  // ==========================================================
 
   const readBooksFiltered =
     books
-      .filter(
-        (book) => book.isRead
-      )
-      .filter((book) =>
+      .filter((b) => b.isRead)
+
+      .filter((b) =>
         filterGenre === 'all'
           ? true
-          : book.genre ===
-            filterGenre
+          : b.genre === filterGenre
       )
-      .filter((book) => {
+
+      .filter((b) => {
         if (
           filterFormat === 'all'
         ) {
@@ -1224,7 +1485,7 @@ export default function LibraryApp() {
           'cartaceo'
         ) {
           return (
-            book.format ===
+            b.format ===
             'cartaceo'
           );
         }
@@ -1234,16 +1495,17 @@ export default function LibraryApp() {
           'ebook'
         ) {
           return (
-            book.format ===
+            b.format ===
               'ebook' ||
-            book.format ===
+            b.format ===
               'ebook_and_paper'
           );
         }
 
         return true;
       })
-      .filter((book) => {
+
+      .filter((b) => {
         if (
           filterYear === 'all'
         ) {
@@ -1251,38 +1513,36 @@ export default function LibraryApp() {
         }
 
         return (
-          book.readYear?.toString() ===
+          b.readYear?.toString() ===
             filterYear ||
-          book.readMonthYear?.includes(
+          b.readMonthYear?.includes(
             filterYear
           )
         );
       })
-      .filter((book) =>
+
+      .filter((b) =>
         searchQuery === ''
           ? true
-          : book.title
+          : b.title
               .toLowerCase()
               .includes(
                 searchQuery.toLowerCase()
               ) ||
-            book.author
+            b.author
               .toLowerCase()
               .includes(
                 searchQuery.toLowerCase()
               )
       );
 
-  /* ============================================================
-     AUTORI
-  ============================================================ */
+  // ==========================================================
+  // AUTORI
+  // ==========================================================
 
   const authorsMap =
     books.reduce(
-      (
-        acc,
-        book
-      ) => {
+      (acc, book) => {
         const authorName =
           book.author.trim() ||
           'Autore Sconosciuto';
@@ -1291,9 +1551,7 @@ export default function LibraryApp() {
           acc[authorName] = [];
         }
 
-        acc[authorName].push(
-          book
-        );
+        acc[authorName].push(book);
 
         return acc;
       },
@@ -1310,16 +1568,13 @@ export default function LibraryApp() {
       a.localeCompare(b)
     );
 
-  /* ============================================================
-     GENERI
-  ============================================================ */
+  // ==========================================================
+  // GENERI
+  // ==========================================================
 
   const genresMap =
     books.reduce(
-      (
-        acc,
-        book
-      ) => {
+      (acc, book) => {
         const genreName =
           book.genre?.trim() ||
           'Generico / Altro';
@@ -1328,9 +1583,7 @@ export default function LibraryApp() {
           acc[genreName] = [];
         }
 
-        acc[genreName].push(
-          book
-        );
+        acc[genreName].push(book);
 
         return acc;
       },
@@ -1351,10 +1604,7 @@ export default function LibraryApp() {
     Array.from(
       new Set(
         books
-          .map(
-            (book) =>
-              book.genre
-          )
+          .map((b) => b.genre)
           .filter(Boolean)
       )
     );
@@ -1363,13 +1613,13 @@ export default function LibraryApp() {
     Array.from(
       new Set(
         books
-          .map((book) => {
-            if (book.readYear) {
-              return book.readYear.toString();
+          .map((b) => {
+            if (b.readYear) {
+              return b.readYear.toString();
             }
 
             const match =
-              book.readMonthYear?.match(
+              b.readMonthYear?.match(
                 /\d{4}/
               );
 
@@ -1381,9 +1631,9 @@ export default function LibraryApp() {
       )
     );
 
-  /* ============================================================
-     FORMAT LABEL
-  ============================================================ */
+  // ==========================================================
+  // LABEL FORMATO
+  // ==========================================================
 
   const formatLabel = (
     format: string
@@ -1410,19 +1660,16 @@ export default function LibraryApp() {
     return format;
   };
 
-  /* ============================================================
-     RENDER GRUPPI AUTORE
-  ============================================================ */
+  // ==========================================================
+  // GRUPPO AUTORI
+  // ==========================================================
 
   const renderAuthorGroup = (
     bookList: BookItem[]
   ) => {
     const map =
       bookList.reduce(
-        (
-          acc,
-          book
-        ) => {
+        (acc, book) => {
           const author =
             book.author.trim() ||
             'Autore Sconosciuto';
@@ -1431,9 +1678,7 @@ export default function LibraryApp() {
             acc[author] = [];
           }
 
-          acc[author].push(
-            book
-          );
+          acc[author].push(book);
 
           return acc;
         },
@@ -1443,115 +1688,99 @@ export default function LibraryApp() {
         >
       );
 
-    return Object.keys(
-      map
-    )
+    return Object.keys(map)
       .sort()
-      .map(
-        (author) => (
-          <div
-            key={author}
-            className="space-y-2 pt-2"
-          >
-            <h3 className="font-serif font-bold text-sm text-amber-950 border-b border-amber-900/10 pb-1">
-              {author}
-            </h3>
+      .map((author) => (
+        <div
+          key={author}
+          className="space-y-2 pt-2"
+        >
+          <h3 className="font-serif font-bold text-sm text-amber-950 border-b border-amber-900/10 pb-1">
+            {author}
+          </h3>
 
-            <div className="grid grid-cols-2 gap-3">
-              {map[author]
-                .sort((a, b) =>
-                  (
-                    a.volume || ''
-                  ).localeCompare(
+          <div className="grid grid-cols-2 gap-3">
+            {map[author]
+              .sort((a, b) =>
+                (a.volume || '')
+                  .localeCompare(
                     b.volume || ''
                   )
-                )
-                .map(
-                  (book) => (
-                    <div
-                      key={
-                        book.id
-                      }
-                      onClick={() =>
-                        setSelectedBookDetail(
-                          book
-                        )
-                      }
-                      className="bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex flex-col cursor-pointer"
-                    >
-                      <div className="w-full h-36 bg-amber-100/40 rounded-xl overflow-hidden relative mb-2 border border-amber-900/10">
-                        {book.coverUrl ? (
-                          <img
-                            src={
-                              book.coverUrl
-                            }
-                            alt={
-                              book.title
-                            }
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-amber-800/30">
-                            <Book className="w-6 h-6" />
-                          </div>
-                        )}
-
-                        {book.isRead && (
-                          <div className="absolute top-2 right-2 bg-emerald-700 text-amber-50 p-1 rounded-full shadow">
-                            <CheckCircle2 className="w-3 h-3" />
-                          </div>
-                        )}
-
-                        {book.volume && (
-                          <div className="absolute top-2 left-2 bg-amber-800 text-amber-50 text-[9px] font-bold px-2 py-0.5 rounded-full">
-                            Vol.{' '}
-                            {
-                              book.volume
-                            }
-                          </div>
-                        )}
-                      </div>
-
-                      <h4 className="font-serif font-bold text-xs text-amber-950 line-clamp-2">
-                        {
+              )
+              .map((book) => (
+                <div
+                  key={book.id}
+                  onClick={() =>
+                    setSelectedBookDetail(
+                      book
+                    )
+                  }
+                  className="bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex flex-col cursor-pointer"
+                >
+                  <div className="w-full h-36 bg-amber-100/40 rounded-xl overflow-hidden relative mb-2 border border-amber-900/10">
+                    {book.coverUrl ? (
+                      <img
+                        src={
+                          book.coverUrl
+                        }
+                        alt={
                           book.title
                         }
-                      </h4>
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-amber-800/30">
+                        <Book className="w-6 h-6" />
+                      </div>
+                    )}
 
-                      <p className="text-[10px] text-amber-800/60 mt-0.5">
-                        {book.publishYear
-                          ? `Anno: ${book.publishYear}`
-                          : ''}
-                      </p>
-                    </div>
-                  )
-                )}
-            </div>
+                    {book.isRead && (
+                      <div className="absolute top-2 right-2 bg-emerald-700 text-amber-50 p-1 rounded-full shadow">
+                        <CheckCircle2 className="w-3 h-3" />
+                      </div>
+                    )}
+
+                    {book.volume && (
+                      <div className="absolute top-2 left-2 bg-amber-800 text-amber-50 text-[9px] font-bold px-2 py-0.5 rounded-full">
+                        Vol.{' '}
+                        {book.volume}
+                      </div>
+                    )}
+                  </div>
+
+                  <h4 className="font-serif font-bold text-xs text-amber-950 line-clamp-2">
+                    {book.title}
+                  </h4>
+
+                  <p className="text-[10px] text-amber-800/60 mt-0.5">
+                    {book.publishYear
+                      ? `Anno: ${book.publishYear}`
+                      : ''}
+                  </p>
+                </div>
+              ))}
           </div>
-        )
-      );
+        </div>
+      ));
   };
 
-  /* ============================================================
-     RENDER
-  ============================================================ */
+  // ==========================================================
+  // RENDER
+  // ==========================================================
 
   return (
     <div className="min-h-screen bg-[#FBF9F5] text-amber-950 font-sans pb-24 select-none">
-
-      {/* ======================================================
+      {/* ====================================================
           HEADER
-      ====================================================== */}
+      ==================================================== */}
 
       <header className="sticky top-0 z-20 bg-[#FBF9F5]/90 backdrop-blur-md border-b border-amber-900/10 px-5 py-3.5 flex justify-between items-center">
         <div>
           <span className="text-[11px] font-bold text-amber-800/70 uppercase tracking-widest block">
-            {activeTab ===
-              'home' &&
+            {activeTab === 'home' &&
               'La Mia Collezione'}
 
-            {activeTab ===
-              'read' &&
+            {activeTab === 'read' &&
               'Cronologia Letture'}
 
             {activeTab ===
@@ -1564,19 +1793,16 @@ export default function LibraryApp() {
           </span>
 
           <h1 className="text-2xl font-serif font-extrabold tracking-tight text-amber-950">
-            {activeTab ===
-              'home' &&
+            {activeTab === 'home' &&
               'Home'}
 
-            {activeTab ===
-              'read' &&
+            {activeTab === 'read' &&
               'Libri Letti'}
 
             {activeTab ===
               'authors' &&
-              (selectedAuthor
-                ? selectedAuthor
-                : 'Autori')}
+              (selectedAuthor ||
+                'Autori')}
 
             {activeTab ===
               'settings' &&
@@ -1584,8 +1810,7 @@ export default function LibraryApp() {
           </h1>
         </div>
 
-        {activeTab ===
-          'read' && (
+        {activeTab === 'read' && (
           <button
             onClick={() => {
               resetForm();
@@ -1600,22 +1825,21 @@ export default function LibraryApp() {
         )}
       </header>
 
-      {/* ======================================================
+      {/* ====================================================
           HOME
-      ====================================================== */}
+      ==================================================== */}
 
       {activeTab === 'home' && (
         <div className="p-4 space-y-5 max-w-lg mx-auto">
-
           {homeSubView !==
           'none' ? (
             <div className="space-y-4">
-
               <button
                 onClick={() => {
                   setHomeSubView(
                     'none'
                   );
+
                   setSelectedGenreHome(
                     null
                   );
@@ -1638,8 +1862,8 @@ export default function LibraryApp() {
 
                   {renderAuthorGroup(
                     books.filter(
-                      (book) =>
-                        book.isClassic
+                      (b) =>
+                        b.isClassic
                     )
                   )}
                 </div>
@@ -1648,17 +1872,21 @@ export default function LibraryApp() {
               {homeSubView ===
                 'genres' && (
                 <div className="space-y-4">
-
                   {!selectedGenreHome ? (
                     <div className="space-y-2">
                       <h2 className="text-lg font-serif font-bold text-amber-950 mb-2">
-                        Generi nella Biblioteca
+                        Generi nella
+                        Biblioteca
                       </h2>
 
                       {sortedGenres.map(
-                        (genre) => (
+                        (
+                          genre
+                        ) => (
                           <div
-                            key={genre}
+                            key={
+                              genre
+                            }
                             onClick={() =>
                               setSelectedGenreHome(
                                 genre
@@ -1697,7 +1925,6 @@ export default function LibraryApp() {
                     </div>
                   ) : (
                     <div className="space-y-3">
-
                       <button
                         onClick={() =>
                           setSelectedGenreHome(
@@ -1706,7 +1933,8 @@ export default function LibraryApp() {
                         }
                         className="text-xs font-bold text-amber-800 mb-1 block"
                       >
-                        ← Tutti i generi
+                        ← Tutti i
+                        generi
                       </button>
 
                       <h2 className="text-lg font-serif font-bold text-amber-950">
@@ -1736,9 +1964,7 @@ export default function LibraryApp() {
                   <div className="flex-1">
                     <span className="text-xs font-bold text-amber-800/60 uppercase tracking-wider block">
                       Anno{' '}
-                      {
-                        currentYearNum
-                      }
+                      {currentYearNum}
                     </span>
 
                     <span className="text-2xl font-serif font-bold text-amber-950">
@@ -1767,7 +1993,6 @@ export default function LibraryApp() {
               </div>
 
               <div className="grid grid-cols-2 gap-3.5">
-
                 <div className="bg-[#FFFDF9] p-4 rounded-3xl shadow-sm border border-amber-900/10 flex flex-col justify-between min-h-[9rem]">
                   <div className="w-10 h-10 rounded-2xl bg-amber-100/70 text-amber-900 flex items-center justify-center">
                     <BookOpen className="w-5 h-5" />
@@ -1775,9 +2000,7 @@ export default function LibraryApp() {
 
                   <div className="mt-2">
                     <span className="text-3xl font-serif font-black text-amber-950 leading-none">
-                      {
-                        totalBooks
-                      }
+                      {totalBooks}
                     </span>
 
                     <span className="text-xs font-bold text-amber-800/60 uppercase tracking-wider block mt-1">
@@ -1789,9 +2012,7 @@ export default function LibraryApp() {
                         totalCartacei
                       }{' '}
                       Cartacei e{' '}
-                      {
-                        totalEbook
-                      }{' '}
+                      {totalEbook}{' '}
                       eBook
                     </div>
                   </div>
@@ -1818,9 +2039,7 @@ export default function LibraryApp() {
                         readCartacei
                       }{' '}
                       Cartacei e{' '}
-                      {
-                        readEbook
-                      }{' '}
+                      {readEbook}{' '}
                       eBook
                     </div>
                   </div>
@@ -1833,7 +2052,6 @@ export default function LibraryApp() {
                 </h2>
 
                 <div className="grid grid-cols-2 gap-3.5">
-
                   <div
                     onClick={() =>
                       setHomeSubView(
@@ -1852,11 +2070,12 @@ export default function LibraryApp() {
                       <span className="text-xs text-amber-200/80 font-medium">
                         {
                           books.filter(
-                            (book) =>
-                              book.isClassic
+                            (b) =>
+                              b.isClassic
                           ).length
                         }{' '}
-                        libri conservati
+                        libri
+                        conservati
                       </span>
                     </div>
                   </div>
@@ -1884,7 +2103,6 @@ export default function LibraryApp() {
                       </span>
                     </div>
                   </div>
-
                 </div>
               </div>
             </>
@@ -1892,15 +2110,13 @@ export default function LibraryApp() {
         </div>
       )}
 
-      {/* ======================================================
+      {/* ====================================================
           LIBRI LETTI
-      ====================================================== */}
+      ==================================================== */}
 
       {activeTab === 'read' && (
         <div className="p-4 space-y-4 max-w-lg mx-auto">
-
           <div className="space-y-2.5">
-
             <div className="relative">
               <Search className="w-4 h-4 absolute left-3.5 top-3 text-amber-800/40" />
 
@@ -1918,9 +2134,10 @@ export default function LibraryApp() {
             </div>
 
             <div className="flex gap-2 overflow-x-auto pb-1 text-xs">
-
               <select
-                value={filterGenre}
+                value={
+                  filterGenre
+                }
                 onChange={(e) =>
                   setFilterGenre(
                     e.target.value
@@ -1933,19 +2150,21 @@ export default function LibraryApp() {
                 </option>
 
                 {availableGenres.map(
-                  (genre) => (
+                  (g) => (
                     <option
-                      key={genre}
-                      value={genre}
+                      key={g}
+                      value={g}
                     >
-                      {genre}
+                      {g}
                     </option>
                   )
                 )}
               </select>
 
               <select
-                value={filterFormat}
+                value={
+                  filterFormat
+                }
                 onChange={(e) =>
                   setFilterFormat(
                     e.target.value
@@ -1980,33 +2199,37 @@ export default function LibraryApp() {
                 </option>
 
                 {availableYears.map(
-                  (year) => (
+                  (y) => (
                     <option
-                      key={year}
-                      value={year!}
+                      key={y}
+                      value={y!}
                     >
-                      {year}
+                      {y}
                     </option>
                   )
                 )}
               </select>
-
             </div>
           </div>
 
           <p className="text-[11px] text-amber-800/50 font-medium px-1">
-            Trascina tramite l'icona a sinistra per riordinare l'elenco dei libri letti.
+            Trascina tramite
+            l'icona a sinistra
+            per riordinare
+            l'elenco dei libri
+            letti.
           </p>
 
           <div className="space-y-3">
-
             {readBooksFiltered.length ===
             0 ? (
               <div className="text-center py-12 bg-[#FFFDF9] rounded-3xl border border-dashed border-amber-900/20">
                 <BookOpen className="w-8 h-8 text-amber-800/30 mx-auto mb-2" />
 
                 <p className="text-xs text-amber-800/60 font-medium">
-                  Nessun libro letto trovato.
+                  Nessun libro
+                  letto
+                  trovato.
                 </p>
               </div>
             ) : (
@@ -2016,14 +2239,18 @@ export default function LibraryApp() {
                   index
                 ) => (
                   <div
-                    key={book.id}
+                    key={
+                      book.id
+                    }
                     draggable
                     onDragStart={() =>
                       handleDragStart(
                         index
                       )
                     }
-                    onDragOver={(e) =>
+                    onDragOver={(
+                      e
+                    ) =>
                       handleDragOver(
                         e,
                         index
@@ -2129,29 +2356,26 @@ export default function LibraryApp() {
                 )
               )
             )}
-
           </div>
         </div>
       )}
 
-      {/* ======================================================
+      {/* ====================================================
           AUTORI
-      ====================================================== */}
+      ==================================================== */}
 
-      {activeTab ===
-        'authors' && (
+      {activeTab === 'authors' && (
         <div className="p-4 space-y-4 max-w-lg mx-auto">
-
           {!selectedAuthor ? (
             <div className="space-y-2">
-
               {sortedAuthors.length ===
               0 ? (
                 <div className="text-center py-12 bg-[#FFFDF9] rounded-3xl border border-dashed border-amber-900/20">
                   <Users className="w-8 h-8 text-amber-800/30 mx-auto mb-2" />
 
                   <p className="text-xs text-amber-800/60 font-medium">
-                    Nessun autore presente.
+                    Nessun autore
+                    presente.
                   </p>
                 </div>
               ) : (
@@ -2201,7 +2425,6 @@ export default function LibraryApp() {
             </div>
           ) : (
             <div className="space-y-4">
-
               <button
                 onClick={() =>
                   setSelectedAuthor(
@@ -2210,16 +2433,18 @@ export default function LibraryApp() {
                 }
                 className="text-xs font-bold text-amber-800 flex items-center gap-1 mb-2"
               >
-                ← Torna alla lista autori
+                ← Torna alla lista
+                autori
               </button>
 
               <div className="grid grid-cols-2 gap-3.5">
-
                 {authorsMap[
                   selectedAuthor
                 ]?.map((book) => (
                   <div
-                    key={book.id}
+                    key={
+                      book.id
+                    }
                     onClick={() =>
                       setSelectedBookDetail(
                         book
@@ -2228,7 +2453,6 @@ export default function LibraryApp() {
                     className="bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex flex-col cursor-pointer relative"
                   >
                     <div className="w-full h-44 bg-amber-100/40 rounded-xl overflow-hidden relative border border-amber-900/10 mb-2">
-
                       {book.coverUrl ? (
                         <img
                           src={
@@ -2280,25 +2504,23 @@ export default function LibraryApp() {
                     </p>
                   </div>
                 ))}
-
               </div>
             </div>
           )}
         </div>
       )}
 
-      {/* ======================================================
+      {/* ====================================================
           SETTINGS
-      ====================================================== */}
+      ==================================================== */}
 
       {activeTab ===
         'settings' && (
         <div className="p-4 space-y-5 max-w-lg mx-auto">
-
           <div className="bg-[#FFFDF9] rounded-3xl p-4 shadow-sm border border-amber-900/10 space-y-3">
-
             <h2 className="text-xs font-bold text-amber-800/60 uppercase tracking-wider">
-              Esporta la tua Biblioteca
+              Esporta la tua
+              Biblioteca
             </h2>
 
             <button
@@ -2308,7 +2530,9 @@ export default function LibraryApp() {
               className="w-full p-3 bg-emerald-50 text-emerald-900 rounded-2xl font-bold text-xs flex items-center gap-3 border border-emerald-200"
             >
               <FileSpreadsheet className="w-5 h-5 text-emerald-700" />
-              Esporta in Foglio Excel (.xlsx)
+
+              Esporta in Foglio
+              Excel (.xlsx)
             </button>
 
             <button
@@ -2318,15 +2542,15 @@ export default function LibraryApp() {
               className="w-full p-3 bg-rose-50 text-rose-900 rounded-2xl font-bold text-xs flex items-center gap-3 border border-rose-200"
             >
               <FileText className="w-5 h-5 text-rose-700" />
+
               Esporta Report PDF
             </button>
-
           </div>
 
           <div className="bg-[#FFFDF9] rounded-3xl p-4 shadow-sm border border-amber-900/10 space-y-3">
-
             <h2 className="text-xs font-bold text-amber-800/60 uppercase tracking-wider">
-              Backup & Ripristino Dati
+              Backup &
+              Ripristino Dati
             </h2>
 
             <button
@@ -2336,12 +2560,16 @@ export default function LibraryApp() {
               className="w-full p-3 bg-amber-100/60 text-amber-950 rounded-2xl font-bold text-xs flex items-center gap-3 border border-amber-200"
             >
               <Download className="w-5 h-5 text-amber-800" />
-              Salva Backup Dati (JSON)
+
+              Salva Backup Dati
+              (JSON)
             </button>
 
             <label className="w-full p-3 bg-stone-100/80 text-stone-900 rounded-2xl font-bold text-xs flex items-center gap-3 border border-stone-200 cursor-pointer">
               <Upload className="w-5 h-5 text-stone-700" />
-              Ripristina Backup da File
+
+              Ripristina Backup
+              da File
 
               <input
                 type="file"
@@ -2352,11 +2580,9 @@ export default function LibraryApp() {
                 className="hidden"
               />
             </label>
-
           </div>
 
           <div className="bg-[#FFFDF9] rounded-3xl p-4 shadow-sm border border-amber-900/10 space-y-3">
-
             <h2 className="text-xs font-bold text-rose-700 uppercase tracking-wider">
               Zona Pericolo
             </h2>
@@ -2368,22 +2594,21 @@ export default function LibraryApp() {
               className="w-full p-3 bg-rose-700 text-amber-50 rounded-2xl font-bold text-xs flex items-center justify-center gap-2"
             >
               <Trash2 className="w-4 h-4" />
-              Cancella Intera Biblioteca
-            </button>
 
+              Cancella Intera
+              Biblioteca
+            </button>
           </div>
         </div>
       )}
 
-      {/* ======================================================
-          MODALE DETTAGLIO LIBRO
-      ====================================================== */}
+      {/* ====================================================
+          DETTAGLIO LIBRO
+      ==================================================== */}
 
       {selectedBookDetail && (
         <div className="fixed inset-0 z-50 bg-amber-950/40 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-
           <div className="bg-[#FFFDF9] w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[90vh] overflow-y-auto p-6 space-y-4 shadow-2xl relative border border-amber-900/10">
-
             <button
               onClick={() =>
                 setSelectedBookDetail(
@@ -2396,9 +2621,7 @@ export default function LibraryApp() {
             </button>
 
             <div className="flex gap-4 items-start pt-2">
-
               <div className="w-24 h-36 bg-amber-100/40 rounded-xl overflow-hidden border border-amber-900/10 flex-shrink-0">
-
                 {selectedBookDetail.coverUrl ? (
                   <img
                     src={
@@ -2414,11 +2637,9 @@ export default function LibraryApp() {
                     <Book className="w-8 h-8" />
                   </div>
                 )}
-
               </div>
 
               <div className="flex-1">
-
                 <h2 className="text-lg font-serif font-bold text-amber-950 leading-tight">
                   {
                     selectedBookDetail.title
@@ -2432,7 +2653,6 @@ export default function LibraryApp() {
                 </p>
 
                 <div className="flex flex-wrap gap-2 mt-3">
-
                   <span className="text-[10px] px-2.5 py-1 rounded-full bg-amber-100/70 text-amber-900 font-bold">
                     {formatLabel(
                       selectedBookDetail.format
@@ -2454,23 +2674,20 @@ export default function LibraryApp() {
                       In Biblioteca
                     </span>
                   )}
-
                 </div>
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3 bg-amber-50/60 p-4 rounded-2xl text-xs text-amber-900">
-
               <div>
                 <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Paese di Pubblicazione:
+                  Paese di
+                  Pubblicazione:
                 </span>
 
                 <span className="font-bold">
-                  {
-                    selectedBookDetail.publishCountry ||
-                    '-'
-                  }
+                  {selectedBookDetail.publishCountry ||
+                    '-'}
                 </span>
               </div>
 
@@ -2480,23 +2697,20 @@ export default function LibraryApp() {
                 </span>
 
                 <span className="font-bold">
-                  {
-                    selectedBookDetail.publisher ||
-                    '-'
-                  }
+                  {selectedBookDetail.publisher ||
+                    '-'}
                 </span>
               </div>
 
               <div>
                 <span className="block text-amber-800/50 font-semibold text-[10px]">
-                  Anno Pubblicazione:
+                  Anno
+                  Pubblicazione:
                 </span>
 
                 <span className="font-bold">
-                  {
-                    selectedBookDetail.publishYear ||
-                    '-'
-                  }
+                  {selectedBookDetail.publishYear ||
+                    '-'}
                 </span>
               </div>
 
@@ -2506,10 +2720,8 @@ export default function LibraryApp() {
                 </span>
 
                 <span className="font-bold">
-                  {
-                    selectedBookDetail.pages ||
-                    '-'
-                  }
+                  {selectedBookDetail.pages ||
+                    '-'}
                 </span>
               </div>
 
@@ -2519,10 +2731,8 @@ export default function LibraryApp() {
                 </span>
 
                 <span className="font-bold">
-                  {
-                    selectedBookDetail.genre ||
-                    '-'
-                  }
+                  {selectedBookDetail.genre ||
+                    '-'}
                 </span>
               </div>
 
@@ -2532,10 +2742,8 @@ export default function LibraryApp() {
                 </span>
 
                 <span className="font-bold">
-                  {
-                    selectedBookDetail.seriesTag ||
-                    '-'
-                  }
+                  {selectedBookDetail.seriesTag ||
+                    '-'}
                 </span>
               </div>
 
@@ -2545,46 +2753,38 @@ export default function LibraryApp() {
                 </span>
 
                 <span className="font-bold">
-                  {
-                    selectedBookDetail.volume ||
-                    '-'
-                  }
+                  {selectedBookDetail.volume ||
+                    '-'}
                 </span>
               </div>
 
-              {selectedBookDetail.isbn && (
-                <div>
-                  <span className="block text-amber-800/50 font-semibold text-[10px]">
-                    ISBN:
-                  </span>
+              <div>
+                <span className="block text-amber-800/50 font-semibold text-[10px]">
+                  ISBN:
+                </span>
 
-                  <span className="font-bold">
-                    {
-                      selectedBookDetail.isbn
-                    }
-                  </span>
-                </div>
-              )}
+                <span className="font-bold break-all">
+                  {selectedBookDetail.isbn ||
+                    '-'}
+                </span>
+              </div>
 
               {selectedBookDetail.isRead && (
                 <div className="col-span-2 border-t border-amber-900/10 pt-2">
                   <span className="block text-amber-800/50 font-semibold text-[10px]">
-                    Mese & Anno di Lettura:
+                    Mese & Anno di
+                    Lettura:
                   </span>
 
                   <span className="font-bold">
-                    {
-                      selectedBookDetail.readMonthYear ||
-                      '-'
-                    }
+                    {selectedBookDetail.readMonthYear ||
+                      '-'}
                   </span>
                 </div>
               )}
-
             </div>
 
             <div className="grid grid-cols-2 gap-3 pt-2">
-
               <button
                 onClick={() =>
                   handleEditBook(
@@ -2594,6 +2794,7 @@ export default function LibraryApp() {
                 className="py-3 bg-amber-800 text-amber-50 rounded-xl font-bold text-xs flex items-center justify-center gap-2"
               >
                 <Edit className="w-4 h-4" />
+
                 Modifica
               </button>
 
@@ -2606,137 +2807,24 @@ export default function LibraryApp() {
                 className="py-3 bg-rose-100 text-rose-800 rounded-xl font-bold text-xs flex items-center justify-center gap-2 border border-rose-200"
               >
                 <Trash2 className="w-4 h-4" />
+
                 Elimina
               </button>
-
             </div>
           </div>
         </div>
       )}
 
-      {/* ======================================================
-          MODALE CAMERA ISBN
-      ====================================================== */}
-
-      {isCameraScannerOpen && (
-        <div className="fixed inset-0 z-[70] bg-black flex flex-col">
-
-          <div className="flex items-center justify-between p-4 bg-black text-white">
-
-            <div>
-              <h2 className="font-serif font-bold text-base">
-                Scansiona ISBN
-              </h2>
-
-              <p className="text-[10px] text-white/60 mt-0.5">
-                Inquadra il codice a barre sul retro del libro
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={
-                stopCameraScanner
-              }
-              className="p-2 bg-white/10 rounded-full"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-          </div>
-
-          <div className="flex-1 relative flex items-center justify-center overflow-hidden">
-
-            {!cameraError && (
-              <video
-                ref={videoRef}
-                muted
-                playsInline
-                autoPlay
-                className="absolute inset-0 w-full h-full object-cover"
-              />
-            )}
-
-            {!cameraError && (
-              <>
-                <div className="relative z-10 w-[82%] max-w-sm aspect-[2/1] border-2 border-white rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]">
-
-                  <div className="absolute left-0 right-0 top-1/2 h-0.5 bg-red-500 shadow-lg" />
-
-                  <div className="absolute -top-1 -left-1 w-8 h-8 border-t-4 border-l-4 border-amber-400 rounded-tl-xl" />
-
-                  <div className="absolute -top-1 -right-1 w-8 h-8 border-t-4 border-r-4 border-amber-400 rounded-tr-xl" />
-
-                  <div className="absolute -bottom-1 -left-1 w-8 h-8 border-b-4 border-l-4 border-amber-400 rounded-bl-xl" />
-
-                  <div className="absolute -bottom-1 -right-1 w-8 h-8 border-b-4 border-r-4 border-amber-400 rounded-br-xl" />
-
-                </div>
-
-                <div className="absolute bottom-8 left-0 right-0 z-20 text-center">
-
-                  <span className="inline-block px-4 py-2 bg-black/60 backdrop-blur-md rounded-full text-white text-xs font-medium">
-                    Posiziona il codice ISBN all'interno del riquadro
-                  </span>
-
-                </div>
-              </>
-            )}
-
-            {cameraError && (
-              <div className="relative z-20 max-w-sm mx-auto px-6 text-center">
-
-                <Scan className="w-12 h-12 text-amber-400 mx-auto mb-4" />
-
-                <p className="text-white text-sm font-medium">
-                  {cameraError}
-                </p>
-
-                <button
-                  type="button"
-                  onClick={
-                    stopCameraScanner
-                  }
-                  className="mt-5 px-5 py-3 bg-white text-black rounded-xl text-xs font-bold"
-                >
-                  Torna al form
-                </button>
-
-              </div>
-            )}
-
-          </div>
-
-          {!cameraError && (
-            <div className="p-4 bg-black text-center">
-
-              <button
-                type="button"
-                onClick={
-                  stopCameraScanner
-                }
-                className="px-6 py-3 bg-white/10 text-white rounded-xl text-xs font-bold"
-              >
-                Inserisci ISBN manualmente
-              </button>
-
-            </div>
-          )}
-
-        </div>
-      )}
-
-      {/* ======================================================
+      {/* ====================================================
           MODALE AGGIUNTA / MODIFICA
-      ====================================================== */}
+      ==================================================== */}
 
       {isAddModalOpen && (
         <div className="fixed inset-0 z-50 bg-amber-950/40 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-
-          <div className="bg-[#FFFDF9] w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[90vh] overflow-y-auto p-6 space-y-4 shadow-2xl relative border border-amber-900/10">
+          <div className="bg-[#FFFDF9] w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[92vh] overflow-y-auto p-6 space-y-4 shadow-2xl relative border border-amber-900/10">
+            {/* HEADER */}
 
             <div className="flex justify-between items-center border-b border-amber-900/10 pb-3">
-
               <h2 className="text-base font-serif font-bold text-amber-950">
                 {formData.id
                   ? 'Modifica Libro'
@@ -2744,53 +2832,114 @@ export default function LibraryApp() {
               </h2>
 
               <button
-                onClick={() => {
-                  stopCameraScanner();
+                onClick={() =>
                   setIsAddModalOpen(
                     false
-                  );
-                }}
+                  )
+                }
                 className="p-2 text-amber-800/40"
               >
                 <X className="w-5 h-5" />
               </button>
-
             </div>
 
             {/* =================================================
-                ISBN / CAMERA
-            ================================================= */}
+                SCANNER ISBN
+            ================================================== */}
 
             <div className="bg-amber-100/50 p-3.5 rounded-2xl space-y-3 border border-amber-900/10">
-
               <div className="flex justify-between items-center">
-
                 <div>
                   <span className="text-[10px] font-bold text-amber-900 uppercase tracking-wider block">
-                    Inserimento automatico
+                    Inserimento ISBN
                   </span>
 
-                  <span className="text-[10px] text-amber-800/60 font-medium">
-                    Scansiona il codice ISBN oppure inseriscilo manualmente
+                  <span className="text-[10px] text-amber-800/60">
+                    Scansiona il
+                    codice o
+                    inseriscilo
+                    manualmente
                   </span>
                 </div>
 
-                <Scan className="w-5 h-5 text-amber-800" />
-
+                <Scan className="w-4 h-4 text-amber-800" />
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              {/* PULSANTE FOTOCAMERA */}
 
-                <button
-                  type="button"
-                  onClick={
-                    startCameraScanner
+              <button
+                type="button"
+                onClick={() =>
+                  setIsScannerOpen(
+                    true
+                  )
+                }
+                className="w-full py-3 bg-amber-800 text-amber-50 rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-md active:scale-[0.98] transition-transform"
+              >
+                <Camera className="w-4 h-4" />
+
+                Scansiona ISBN con
+                fotocamera
+              </button>
+
+              <div className="flex items-center gap-2">
+                <div className="h-px bg-amber-900/10 flex-1" />
+
+                <span className="text-[9px] text-amber-800/40 font-bold uppercase">
+                  oppure
+                </span>
+
+                <div className="h-px bg-amber-900/10 flex-1" />
+              </div>
+
+              {/* INPUT MANUALE */}
+
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  placeholder="ISBN es. 9788806221843"
+                  value={
+                    isbnInput
                   }
-                  className="py-2.5 bg-amber-800 text-amber-50 rounded-xl text-xs font-bold flex items-center justify-center gap-2 active:scale-95 transition-transform"
-                >
-                  <Scan className="w-4 h-4" />
-                  Scansiona ISBN
-                </button>
+                  onChange={(e) => {
+                    const value =
+                      e.target.value.replace(
+                        /[^0-9Xx-]/g,
+                        ''
+                      );
+
+                    setIsbnInput(
+                      value
+                    );
+
+                    setFormData(
+                      (
+                        prev
+                      ) => ({
+                        ...prev,
+                        isbn: value.replace(
+                          /-/g,
+                          ''
+                        ),
+                      })
+                    );
+                  }}
+                  onKeyDown={(
+                    e
+                  ) => {
+                    if (
+                      e.key ===
+                      'Enter'
+                    ) {
+                      e.preventDefault();
+
+                      handleSearchBookByISBN();
+                    }
+                  }}
+                  className="flex-1 min-w-0 p-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
+                />
 
                 <button
                   type="button"
@@ -2798,63 +2947,33 @@ export default function LibraryApp() {
                     handleSearchBookByISBN()
                   }
                   disabled={
-                    isSearchingIsbn ||
-                    !isbnInput.trim()
+                    isSearchingIsbn
                   }
-                  className="py-2.5 bg-[#FFFDF9] text-amber-900 border border-amber-900/10 rounded-xl text-xs font-bold flex items-center justify-center gap-2 disabled:opacity-40"
+                  className="px-4 bg-stone-800 text-amber-50 rounded-xl text-xs font-bold active:scale-95 transition-transform disabled:opacity-50 flex items-center justify-center min-w-[70px]"
                 >
-                  <Search className="w-4 h-4" />
-
-                  {isSearchingIsbn
-                    ? 'Ricerca...'
-                    : 'Cerca ISBN'}
+                  {isSearchingIsbn ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    'Cerca'
+                  )}
                 </button>
-
               </div>
-
-              <input
-                type="text"
-                inputMode="numeric"
-                autoComplete="off"
-                placeholder="ISBN 10 o ISBN 13"
-                value={isbnInput}
-                onChange={(e) =>
-                  setIsbnInput(
-                    e.target.value.replace(
-                      /[^0-9Xx-]/g,
-                      ''
-                    )
-                  )
-                }
-                onKeyDown={(e) => {
-                  if (
-                    e.key === 'Enter'
-                  ) {
-                    e.preventDefault();
-
-                    handleSearchBookByISBN();
-                  }
-                }}
-                className="w-full p-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
-              />
 
               {formData.isbn && (
                 <div className="flex items-center gap-2 text-[10px] text-emerald-700 font-semibold">
                   <CheckCircle2 className="w-3.5 h-3.5" />
 
-                  ISBN associato:
-                  {' '}
+                  ISBN:
                   {
                     formData.isbn
                   }
                 </div>
               )}
-
             </div>
 
             {/* =================================================
                 FORM
-            ================================================= */}
+            ================================================== */}
 
             <form
               onSubmit={
@@ -2862,26 +2981,29 @@ export default function LibraryApp() {
               }
               className="space-y-3 text-xs"
             >
+              {/* TITOLO */}
 
               <input
                 type="text"
                 placeholder="Titolo *"
                 value={
-                  formData.title || ''
+                  formData.title ||
+                  ''
                 }
                 onChange={(e) =>
                   setFormData({
                     ...formData,
-                    title:
-                      e.target.value,
+                    title: e.target
+                      .value,
                   })
                 }
-                className="w-full p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                className="w-full p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                 required
               />
 
-              <div className="grid grid-cols-2 gap-2">
+              {/* AUTORE / PAESE */}
 
+              <div className="grid grid-cols-2 gap-2">
                 <input
                   type="text"
                   placeholder="Autore *"
@@ -2893,10 +3015,11 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       author:
-                        e.target.value,
+                        e.target
+                          .value,
                     })
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                   required
                 />
 
@@ -2911,13 +3034,15 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       publishCountry:
-                        e.target.value,
+                        e.target
+                          .value,
                     })
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                 />
-
               </div>
+
+              {/* COPERTINA */}
 
               <input
                 type="text"
@@ -2930,42 +3055,16 @@ export default function LibraryApp() {
                   setFormData({
                     ...formData,
                     coverUrl:
-                      e.target.value,
+                      e.target
+                        .value,
                   })
                 }
-                className="w-full p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                className="w-full p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
               />
 
-              {formData.coverUrl && (
-                <div className="flex items-center gap-3 p-2 bg-amber-50 rounded-xl border border-amber-900/10">
-
-                  <img
-                    src={
-                      formData.coverUrl
-                    }
-                    alt="Anteprima copertina"
-                    className="w-12 h-16 object-cover rounded-lg border border-amber-900/10"
-                    onError={(e) => {
-                      e.currentTarget.style.display =
-                        'none';
-                    }}
-                  />
-
-                  <div>
-                    <p className="text-[10px] font-bold text-amber-900">
-                      Anteprima copertina
-                    </p>
-
-                    <p className="text-[9px] text-amber-800/60">
-                      Recuperata automaticamente dall'ISBN
-                    </p>
-                  </div>
-
-                </div>
-              )}
+              {/* EDITORE / ANNO */}
 
               <div className="grid grid-cols-2 gap-2">
-
                 <input
                   type="text"
                   placeholder="Editore"
@@ -2977,14 +3076,16 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       publisher:
-                        e.target.value,
+                        e.target
+                          .value,
                     })
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                 />
 
                 <input
                   type="text"
+                  inputMode="numeric"
                   placeholder="Anno Pubblicazione"
                   value={
                     formData.publishYear ||
@@ -2994,16 +3095,20 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       publishYear:
-                        e.target.value,
+                        e.target
+                          .value.replace(
+                            /\D/g,
+                            ''
+                          ),
                     })
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                 />
-
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              {/* GENERE / PAGINE */}
 
+              <div className="grid grid-cols-2 gap-2">
                 <input
                   type="text"
                   placeholder="Genere"
@@ -3015,10 +3120,11 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       genre:
-                        e.target.value,
+                        e.target
+                          .value,
                     })
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                 />
 
                 <input
@@ -3027,10 +3133,11 @@ export default function LibraryApp() {
                   pattern="[0-9]*"
                   placeholder="Numero Pagine"
                   value={
-                    formData.pages || ''
+                    formData.pages ||
+                    ''
                   }
                   onChange={(e) => {
-                    const value =
+                    const val =
                       e.target.value.replace(
                         /\D/g,
                         ''
@@ -3038,21 +3145,20 @@ export default function LibraryApp() {
 
                     setFormData({
                       ...formData,
-                      pages: value
+                      pages: val
                         ? parseInt(
-                            value,
-                            10
+                            val
                           )
                         : undefined,
                     });
                   }}
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                 />
-
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              {/* SERIE / VOLUME */}
 
+              <div className="grid grid-cols-2 gap-2">
                 <input
                   type="text"
                   placeholder="Serie / Tag"
@@ -3064,10 +3170,11 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       seriesTag:
-                        e.target.value,
+                        e.target
+                          .value,
                     })
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                 />
 
                 <input
@@ -3081,20 +3188,20 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       volume:
-                        e.target.value,
+                        e.target
+                          .value,
                     })
                   }
-                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none"
+                  className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-amber-800/20"
                 />
-
               </div>
 
               {/* CLASSICO */}
 
               <div className="flex items-center justify-between p-3 bg-amber-50/60 rounded-xl border border-amber-900/10">
-
                 <span className="font-bold text-amber-950 flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-amber-600" />
+
                   È un Classico?
                 </span>
 
@@ -3107,24 +3214,22 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       isClassic:
-                        e.target.checked,
+                        e.target
+                          .checked,
                     })
                   }
                   className="w-5 h-5 accent-amber-800"
                 />
-
               </div>
 
               {/* FORMATO */}
 
               <div className="p-3 bg-amber-50/60 rounded-xl space-y-2 border border-amber-900/10">
-
                 <span className="font-bold text-amber-950 block">
                   Formato:
                 </span>
 
                 <div className="flex gap-2">
-
                   <button
                     type="button"
                     onClick={() =>
@@ -3164,7 +3269,6 @@ export default function LibraryApp() {
                   >
                     eBook
                   </button>
-
                 </div>
 
                 {(formData.format ===
@@ -3172,7 +3276,6 @@ export default function LibraryApp() {
                   formData.format ===
                     'ebook_and_paper') && (
                   <label className="flex items-center gap-2 pt-1 cursor-pointer">
-
                     <input
                       type="checkbox"
                       checked={
@@ -3193,18 +3296,17 @@ export default function LibraryApp() {
                     />
 
                     <span className="text-[11px] font-medium text-amber-900">
-                      Acquistato anche in formato Cartaceo
+                      Acquistato anche
+                      in formato
+                      Cartaceo
                     </span>
-
                   </label>
                 )}
-
               </div>
 
               {/* LETTO */}
 
               <div className="flex items-center justify-between p-3 bg-amber-50/60 rounded-xl border border-amber-900/10">
-
                 <span className="font-bold text-amber-950">
                   Letto
                 </span>
@@ -3218,25 +3320,23 @@ export default function LibraryApp() {
                     setFormData({
                       ...formData,
                       isRead:
-                        e.target.checked,
+                        e.target
+                          .checked,
                     })
                   }
                   className="w-5 h-5 accent-amber-800"
                 />
-
               </div>
 
               {/* DATA LETTURA */}
 
               {formData.isRead && (
                 <div className="p-3 bg-amber-100/40 border border-amber-900/10 rounded-xl space-y-2">
-
                   <span className="font-bold text-amber-950 block text-[11px] uppercase tracking-wider">
                     Data di Lettura
                   </span>
 
                   <div className="grid grid-cols-2 gap-2">
-
                     <div>
                       <label className="block text-[10px] text-amber-800/70 font-semibold mb-1">
                         Mese:
@@ -3247,29 +3347,33 @@ export default function LibraryApp() {
                           formData.readMonth ||
                           'Gennaio'
                         }
-                        onChange={(e) =>
+                        onChange={(
+                          e
+                        ) =>
                           setFormData({
                             ...formData,
                             readMonth:
-                              e.target.value,
+                              e
+                                .target
+                                .value,
                           })
                         }
                         className="w-full p-2.5 bg-[#FFFDF9] border border-amber-900/10 rounded-xl font-semibold text-amber-950 focus:outline-none"
                       >
                         {MONTHS.map(
                           (
-                            month
+                            m
                           ) => (
                             <option
                               key={
-                                month
+                                m
                               }
                               value={
-                                month
+                                m
                               }
                             >
                               {
-                                month
+                                m
                               }
                             </option>
                           )
@@ -3287,13 +3391,16 @@ export default function LibraryApp() {
                           formData.readYear ||
                           currentYearNum
                         }
-                        onChange={(e) =>
+                        onChange={(
+                          e
+                        ) =>
                           setFormData({
                             ...formData,
                             readYear:
                               parseInt(
-                                e.target.value,
-                                10
+                                e
+                                  .target
+                                  .value
                               ),
                           })
                         }
@@ -3301,25 +3408,24 @@ export default function LibraryApp() {
                       >
                         {yearsList.map(
                           (
-                            year
+                            y
                           ) => (
                             <option
                               key={
-                                year
+                                y
                               }
                               value={
-                                year
+                                y
                               }
                             >
                               {
-                                year
+                                y
                               }
                             </option>
                           )
                         )}
                       </select>
                     </div>
-
                   </div>
                 </div>
               )}
@@ -3334,29 +3440,49 @@ export default function LibraryApp() {
                   ? 'Aggiorna Libro'
                   : 'Salva Libro'}
               </button>
-
             </form>
           </div>
         </div>
       )}
 
-      {/* ======================================================
+      {/* ====================================================
+          SCANNER CAMERA
+      ==================================================== */}
+
+      {isScannerOpen && (
+        <ISBNScanner
+          onDetected={
+            handleISBNDetected
+          }
+          onClose={() =>
+            setIsScannerOpen(
+              false
+            )
+          }
+        />
+      )}
+
+      {/* ====================================================
           TAB BAR
-      ====================================================== */}
+      ==================================================== */}
 
       <nav className="fixed bottom-0 left-0 right-0 z-30 bg-[#FBF9F5]/90 backdrop-blur-md border-t border-amber-900/10 flex justify-around py-2.5 max-w-lg mx-auto">
-
         <button
           onClick={() => {
-            setActiveTab('home');
-            setSelectedAuthor(null);
+            setActiveTab(
+              'home'
+            );
+
+            setSelectedAuthor(
+              null
+            );
+
             setHomeSubView(
               'none'
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab ===
-            'home'
+            activeTab === 'home'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
@@ -3370,12 +3496,16 @@ export default function LibraryApp() {
 
         <button
           onClick={() => {
-            setActiveTab('read');
-            setSelectedAuthor(null);
+            setActiveTab(
+              'read'
+            );
+
+            setSelectedAuthor(
+              null
+            );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab ===
-            'read'
+            activeTab === 'read'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
@@ -3392,7 +3522,10 @@ export default function LibraryApp() {
             setActiveTab(
               'authors'
             );
-            setSelectedAuthor(null);
+
+            setSelectedAuthor(
+              null
+            );
           }}
           className={`flex flex-col items-center gap-1 ${
             activeTab ===
@@ -3413,7 +3546,10 @@ export default function LibraryApp() {
             setActiveTab(
               'settings'
             );
-            setSelectedAuthor(null);
+
+            setSelectedAuthor(
+              null
+            );
           }}
           className={`flex flex-col items-center gap-1 ${
             activeTab ===
@@ -3428,7 +3564,6 @@ export default function LibraryApp() {
             Settings
           </span>
         </button>
-
       </nav>
     </div>
   );
