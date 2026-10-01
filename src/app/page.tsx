@@ -56,6 +56,7 @@ import {
 
 export interface BookItem {
   id: string;
+
   title: string;
   author: string;
 
@@ -93,7 +94,7 @@ export interface BookItem {
 
 
 /* =========================================================
-   TIPI GOOGLE BOOKS
+   GOOGLE BOOKS
 ========================================================= */
 
 interface GoogleBooksIndustryIdentifier {
@@ -105,23 +106,31 @@ interface GoogleBooksVolumeInfo {
   title?: string;
   subtitle?: string;
   authors?: string[];
+
   publisher?: string;
   publishedDate?: string;
+
   description?: string;
-  industryIdentifiers?: GoogleBooksIndustryIdentifier[];
+
+  industryIdentifiers?:
+    GoogleBooksIndustryIdentifier[];
+
   readingModes?: {
     text?: boolean;
     image?: boolean;
   };
+
   pageCount?: number;
+
   printType?: string;
+
   categories?: string[];
+
   averageRating?: number;
   ratingsCount?: number;
+
   maturityRating?: string;
-  allowAnonLogging?: boolean;
-  contentVersion?: string;
-  panelizationSummary?: unknown;
+
   imageLinks?: {
     smallThumbnail?: string;
     thumbnail?: string;
@@ -130,7 +139,9 @@ interface GoogleBooksVolumeInfo {
     large?: string;
     extraLarge?: string;
   };
+
   language?: string;
+
   previewLink?: string;
   infoLink?: string;
   canonicalVolumeLink?: string;
@@ -145,6 +156,52 @@ interface GoogleBooksResponse {
   kind?: string;
   totalItems?: number;
   items?: GoogleBooksVolume[];
+}
+
+
+/* =========================================================
+   OPEN LIBRARY
+========================================================= */
+
+interface OpenLibraryAuthor {
+  name?: string;
+}
+
+interface OpenLibraryPublisher {
+  name?: string;
+}
+
+interface OpenLibrarySubject {
+  name?: string;
+}
+
+interface OpenLibraryBook {
+  title?: string;
+
+  authors?: OpenLibraryAuthor[];
+
+  publishers?: OpenLibraryPublisher[];
+
+  publish_date?: string;
+
+  number_of_pages?: number;
+
+  subjects?: OpenLibrarySubject[];
+
+  cover?: {
+    small?: string;
+    medium?: string;
+    large?: string;
+  };
+
+  identifiers?: {
+    isbn_10?: string[];
+    isbn_13?: string[];
+  };
+}
+
+interface OpenLibraryResponse {
+  [key: string]: OpenLibraryBook;
 }
 
 
@@ -167,23 +224,232 @@ const MONTHS = [
   'Dicembre',
 ];
 
-const STORAGE_KEY = 'ios_library_books_v6';
+const STORAGE_KEY =
+  'ios_library_books_v6';
 
 
 /* =========================================================
    UTILITY ISBN
 ========================================================= */
 
-function cleanISBN(value: string) {
+function cleanISBN(
+  value: string
+): string {
   return value
     .replace(/[^0-9Xx]/g, '')
     .toUpperCase();
 }
 
-function isValidISBN(value: string) {
-  const isbn = cleanISBN(value);
 
-  return isbn.length === 10 || isbn.length === 13;
+/* ---------------------------------------------------------
+   ISBN 10 -> ISBN 13
+--------------------------------------------------------- */
+
+function isbn10To13(
+  value: string
+): string {
+  const isbn10 =
+    cleanISBN(value);
+
+  if (isbn10.length !== 10) {
+    return isbn10;
+  }
+
+  const base =
+    `978${isbn10.substring(0, 9)}`;
+
+  let sum = 0;
+
+  for (
+    let i = 0;
+    i < base.length;
+    i++
+  ) {
+    const digit =
+      Number(base[i]);
+
+    sum +=
+      i % 2 === 0
+        ? digit
+        : digit * 3;
+  }
+
+  const checkDigit =
+    (10 - (sum % 10)) % 10;
+
+  return `${base}${checkDigit}`;
+}
+
+
+/* ---------------------------------------------------------
+   Validazione ISBN-10
+--------------------------------------------------------- */
+
+function isValidISBN10(
+  value: string
+): boolean {
+  const isbn =
+    cleanISBN(value);
+
+  if (isbn.length !== 10) {
+    return false;
+  }
+
+  let sum = 0;
+
+  for (
+    let i = 0;
+    i < 10;
+    i++
+  ) {
+    const char =
+      isbn[i];
+
+    const digit =
+      char === 'X'
+        ? 10
+        : Number(char);
+
+    if (
+      !Number.isInteger(digit) ||
+      digit < 0 ||
+      digit > 10
+    ) {
+      return false;
+    }
+
+    sum +=
+      digit * (10 - i);
+  }
+
+  return sum % 11 === 0;
+}
+
+
+/* ---------------------------------------------------------
+   Validazione ISBN-13
+--------------------------------------------------------- */
+
+function isValidISBN13(
+  value: string
+): boolean {
+  const isbn =
+    cleanISBN(value);
+
+  if (isbn.length !== 13) {
+    return false;
+  }
+
+  if (!/^\d{13}$/.test(isbn)) {
+    return false;
+  }
+
+  let sum = 0;
+
+  for (
+    let i = 0;
+    i < 12;
+    i++
+  ) {
+    sum +=
+      Number(isbn[i]) *
+      (i % 2 === 0 ? 1 : 3);
+  }
+
+  const checkDigit =
+    (10 - (sum % 10)) % 10;
+
+  return (
+    checkDigit ===
+    Number(isbn[12])
+  );
+}
+
+
+/* ---------------------------------------------------------
+   Validazione generale ISBN
+--------------------------------------------------------- */
+
+function isValidISBN(
+  value: string
+): boolean {
+  const isbn =
+    cleanISBN(value);
+
+  return (
+    isValidISBN10(isbn) ||
+    isValidISBN13(isbn)
+  );
+}
+
+
+/* =========================================================
+   COPERTINA OPEN LIBRARY
+========================================================= */
+
+function getOpenLibraryCoverUrl(
+  isbn: string
+): string {
+  const clean =
+    cleanISBN(isbn);
+
+  return (
+    `https://covers.openlibrary.org/b/isbn/` +
+    `${encodeURIComponent(clean)}-L.jpg?default=false`
+  );
+}
+
+
+/* =========================================================
+   COMPONENTE COPERTINA
+========================================================= */
+
+function BookCover({
+  src,
+  title,
+  className,
+}: {
+  src?: string;
+  title: string;
+  className?: string;
+}) {
+  const [
+    imageFailed,
+    setImageFailed,
+  ] = useState(false);
+
+  if (
+    !src ||
+    imageFailed
+  ) {
+    return (
+      <div
+        className={
+          className ||
+          'w-full h-full'
+        }
+      >
+        <div className="w-full h-full flex items-center justify-center bg-amber-100/40">
+          <Book className="w-6 h-6 text-amber-800/30" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={title}
+      className={
+        className ||
+        'w-full h-full object-cover'
+      }
+      loading="lazy"
+      onError={() => {
+        setImageFailed(true);
+      }}
+    />
+  );
 }
 
 
@@ -191,184 +457,344 @@ function isValidISBN(value: string) {
    GOOGLE BOOKS
 ========================================================= */
 
-/**
- * Cerca un libro direttamente su Google Books usando ISBN.
- *
- * Non serve una API route Next.js.
- *
- * Endpoint:
- * https://www.googleapis.com/books/v1/volumes
- */
 async function searchGoogleBooksByISBN(
   isbn: string
 ): Promise<BookItem | null> {
-  const clean = cleanISBN(isbn);
+  const clean =
+    cleanISBN(isbn);
 
   if (!isValidISBN(clean)) {
-    throw new Error('ISBN non valido.');
-  }
-
-  const url =
-    `https://www.googleapis.com/books/v1/volumes` +
-    `?q=isbn:${encodeURIComponent(clean)}` +
-    `&maxResults=10` +
-    `&printType=books`;
-
-  const response = await fetch(url, {
-    method: 'GET',
-    cache: 'no-store',
-  });
-
-  if (!response.ok) {
     throw new Error(
-      `Google Books ha restituito errore ${response.status}.`
+      'ISBN non valido.'
     );
   }
 
-  const data =
-    (await response.json()) as GoogleBooksResponse;
-
-  if (
-    !data.items ||
-    data.items.length === 0
-  ) {
-    return null;
-  }
-
   /*
-   * Cerchiamo prima un risultato che abbia
-   * effettivamente lo stesso ISBN.
+   * Se abbiamo ISBN-10,
+   * proviamo anche ISBN-13.
    */
-  const matchingVolume =
-    data.items.find((volume) => {
-      const identifiers =
-        volume.volumeInfo
-          ?.industryIdentifiers || [];
-
-      return identifiers.some(
-        (identifier) =>
-          cleanISBN(
-            identifier.identifier || ''
-          ) === clean
-      );
-    }) || data.items[0];
-
-  const info =
-    matchingVolume.volumeInfo;
-
-  if (!info) {
-    return null;
-  }
-
-  /*
-   * Autore
-   */
-  const author =
-    info.authors &&
-    info.authors.length > 0
-      ? info.authors.join(', ')
-      : '';
-
-  /*
-   * Editore
-   */
-  const publisher =
-    info.publisher || '';
-
-  /*
-   * Data pubblicazione.
-   *
-   * Google Books può restituire:
-   * 2020
-   * 2020-05
-   * 2020-05-12
-   */
-  const publishYear =
-    info.publishedDate
-      ? info.publishedDate.substring(
-          0,
-          4
-        )
-      : '';
-
-  /*
-   * Genere.
-   *
-   * Google Books può restituire più categorie.
-   */
-  const genre =
-    info.categories &&
-    info.categories.length > 0
-      ? info.categories.join(', ')
-      : '';
-
-  /*
-   * ISBN.
-   *
-   * Preferiamo ISBN_13.
-   */
-  const identifiers =
-    info.industryIdentifiers || [];
 
   const isbn13 =
-    identifiers.find(
-      (identifier) =>
-        identifier.type === 'ISBN_13'
-    )?.identifier;
+    clean.length === 10
+      ? isbn10To13(clean)
+      : clean;
 
-  const isbn10 =
-    identifiers.find(
-      (identifier) =>
-        identifier.type === 'ISBN_10'
-    )?.identifier;
+  const queries = Array.from(
+    new Set([
+      `isbn:${clean}`,
+      `isbn:${isbn13}`,
+    ])
+  );
 
-  const detectedISBN =
-    cleanISBN(
-      isbn13 ||
-        isbn10 ||
-        clean
-    );
+  for (
+    const query of queries
+  ) {
+    const url =
+      `https://www.googleapis.com/books/v1/volumes` +
+      `?q=${encodeURIComponent(query)}` +
+      `&maxResults=10` +
+      `&printType=books`;
 
-  /*
-   * Copertina.
-   *
-   * Google Books spesso restituisce http.
-   * Convertiamo in https quando possibile.
-   */
-  const coverUrl =
-    (
+    const response =
+      await fetch(url, {
+        method: 'GET',
+        cache: 'no-store',
+      });
+
+    if (!response.ok) {
+      console.warn(
+        'Google Books HTTP error:',
+        response.status
+      );
+
+      continue;
+    }
+
+    const data =
+      (await response.json()) as
+        GoogleBooksResponse;
+
+    if (
+      !data.items ||
+      data.items.length === 0
+    ) {
+      continue;
+    }
+
+    /*
+     * Cerchiamo una corrispondenza
+     * esatta dell'ISBN.
+     */
+
+    const matchingVolume =
+      data.items.find(
+        (volume) => {
+          const identifiers =
+            volume.volumeInfo
+              ?.industryIdentifiers ||
+            [];
+
+          return identifiers.some(
+            (identifier) => {
+              const value =
+                cleanISBN(
+                  identifier.identifier ||
+                    ''
+                );
+
+              return (
+                value === clean ||
+                value === isbn13
+              );
+            }
+          );
+        }
+      );
+
+    /*
+     * Se non troviamo l'edizione
+     * esatta, prendiamo comunque
+     * il primo risultato.
+     */
+
+    const volume =
+      matchingVolume ||
+      data.items[0];
+
+    const info =
+      volume.volumeInfo;
+
+    if (!info) {
+      continue;
+    }
+
+    const author =
+      info.authors?.join(', ') ||
+      '';
+
+    const publisher =
+      info.publisher ||
+      '';
+
+    const publishYear =
+      info.publishedDate
+        ?.match(/\d{4}/)?.[0] ||
+      '';
+
+    const genre =
+      info.categories?.join(', ') ||
+      '';
+
+    const identifiers =
+      info.industryIdentifiers ||
+      [];
+
+    const detectedISBN =
+      cleanISBN(
+        identifiers.find(
+          (item) =>
+            item.type === 'ISBN_13'
+        )?.identifier ||
+          identifiers.find(
+            (item) =>
+              item.type === 'ISBN_10'
+          )?.identifier ||
+          clean
+      );
+
+    let coverUrl =
       info.imageLinks?.extraLarge ||
       info.imageLinks?.large ||
       info.imageLinks?.medium ||
       info.imageLinks?.thumbnail ||
       info.imageLinks?.smallThumbnail ||
-      ''
-    ).replace(
-      /^http:\/\//i,
-      'https://'
+      '';
+
+    /*
+     * Evita mixed content HTTP/HTTPS.
+     */
+
+    if (coverUrl) {
+      coverUrl =
+        coverUrl.replace(
+          /^http:\/\//i,
+          'https://'
+        );
+    }
+
+    /*
+     * Se Google Books non ha
+     * la copertina, utilizziamo
+     * Open Library.
+     */
+
+    if (!coverUrl) {
+      coverUrl =
+        getOpenLibraryCoverUrl(
+          detectedISBN
+        );
+    }
+
+    return {
+      id: '',
+
+      title:
+        info.title || '',
+
+      author,
+
+      publisher,
+
+      publishYear,
+
+      pages:
+        info.pageCount ||
+        undefined,
+
+      genre,
+
+      coverUrl,
+
+      isbn:
+        detectedISBN,
+
+      format:
+        'cartaceo',
+
+      isRead:
+        false,
+
+      createdAt:
+        Date.now(),
+    };
+  }
+
+  return null;
+}
+
+
+/* =========================================================
+   OPEN LIBRARY
+========================================================= */
+
+async function searchOpenLibraryByISBN(
+  isbn: string
+): Promise<BookItem | null> {
+  const clean =
+    cleanISBN(isbn);
+
+  if (!isValidISBN(clean)) {
+    return null;
+  }
+
+  const url =
+    `https://openlibrary.org/api/books` +
+    `?bibkeys=ISBN:${encodeURIComponent(clean)}` +
+    `&jscmd=data` +
+    `&format=json`;
+
+  const response =
+    await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+
+  if (!response.ok) {
+    throw new Error(
+      `Open Library ha restituito errore ${response.status}.`
+    );
+  }
+
+  const data =
+    (await response.json()) as
+      OpenLibraryResponse;
+
+  const book =
+    data[`ISBN:${clean}`];
+
+  if (!book) {
+    return null;
+  }
+
+  const author =
+    book.authors
+      ?.map(
+        (item) => item.name
+      )
+      .filter(Boolean)
+      .join(', ') ||
+    '';
+
+  const publisher =
+    book.publishers
+      ?.map(
+        (item) => item.name
+      )
+      .filter(Boolean)
+      .join(', ') ||
+    '';
+
+  const publishYear =
+    book.publish_date
+      ?.match(/\d{4}/)?.[0] ||
+    '';
+
+  const genre =
+    book.subjects
+      ?.map(
+        (item) => item.name
+      )
+      .filter(Boolean)
+      .slice(0, 5)
+      .join(', ') ||
+    '';
+
+  const detectedISBN =
+    cleanISBN(
+      book.identifiers?.isbn_13?.[0] ||
+        book.identifiers?.isbn_10?.[0] ||
+        clean
     );
 
-  /*
-   * Creiamo un BookItem parziale.
-   * I campi di gestione della libreria
-   * verranno completati dal form.
-   */
+  const coverUrl =
+    book.cover?.large ||
+    book.cover?.medium ||
+    book.cover?.small ||
+    getOpenLibraryCoverUrl(
+      detectedISBN
+    );
+
   return {
     id: '',
+
     title:
-      info.title || '',
+      book.title || '',
+
     author,
+
     publisher,
+
     publishYear,
+
     pages:
-      info.pageCount ||
+      book.number_of_pages ||
       undefined,
+
     genre,
+
     coverUrl,
-    isbn: detectedISBN,
-    format: 'cartaceo',
-    isRead: false,
-    createdAt: Date.now(),
+
+    isbn:
+      detectedISBN,
+
+    format:
+      'cartaceo',
+
+    isRead:
+      false,
+
+    createdAt:
+      Date.now(),
   };
 }
 
@@ -381,25 +807,35 @@ export default function LibraryApp() {
   const currentYearNum =
     new Date().getFullYear();
 
+
   /* =======================================================
      NAVIGAZIONE
   ======================================================= */
 
-  const [activeTab, setActiveTab] =
-    useState<
-      'home' | 'read' | 'authors' | 'settings'
-    >('home');
+  const [
+    activeTab,
+    setActiveTab,
+  ] = useState<
+    'home' |
+    'read' |
+    'authors' |
+    'settings'
+  >('home');
 
 
   /* =======================================================
      LIBRI
   ======================================================= */
 
-  const [books, setBooks] =
-    useState<BookItem[]>([]);
+  const [
+    books,
+    setBooks,
+  ] = useState<BookItem[]>([]);
 
-  const [isLoaded, setIsLoaded] =
-    useState(false);
+  const [
+    isLoaded,
+    setIsLoaded,
+  ] = useState(false);
 
 
   /* =======================================================
@@ -414,59 +850,71 @@ export default function LibraryApp() {
   const [
     selectedBookDetail,
     setSelectedBookDetail,
-  ] = useState<BookItem | null>(null);
+  ] = useState<BookItem | null>(
+    null
+  );
 
   const [
     selectedAuthor,
     setSelectedAuthor,
-  ] = useState<string | null>(null);
+  ] = useState<string | null>(
+    null
+  );
 
   const [
     homeSubView,
     setHomeSubView,
   ] = useState<
-    'none' | 'classics' | 'genres'
+    'none' |
+    'classics' |
+    'genres'
   >('none');
 
   const [
     selectedGenreHome,
     setSelectedGenreHome,
-  ] = useState<string | null>(null);
+  ] = useState<string | null>(
+    null
+  );
 
 
   /* =======================================================
      FORM
   ======================================================= */
 
-  const [formData, setFormData] =
-    useState<Partial<BookItem>>({
-      title: '',
-      author: '',
-      publishCountry: '',
-      coverUrl: '',
-      publisher: '',
-      publishYear: '',
-      pages: undefined,
-      genre: '',
-      seriesTag: '',
-      volume: '',
-      isClassic: false,
-      format: 'cartaceo',
-      isRead: false,
-      readMonth: 'Gennaio',
-      readYear: currentYearNum,
-      rating: 5,
-      notes: '',
-      isbn: '',
-    });
+  const [
+    formData,
+    setFormData,
+  ] = useState<Partial<BookItem>>({
+    title: '',
+    author: '',
+    publishCountry: '',
+    coverUrl: '',
+    publisher: '',
+    publishYear: '',
+    pages: undefined,
+    genre: '',
+    seriesTag: '',
+    volume: '',
+    isClassic: false,
+    format: 'cartaceo',
+    isRead: false,
+    readMonth: 'Gennaio',
+    readYear: currentYearNum,
+    rating: 5,
+    notes: '',
+    isbn: '',
+  });
 
 
   /* =======================================================
      ISBN
   ======================================================= */
 
-  const [isbnInput, setIsbnInput] =
-    useState('');
+  const [
+    isbnInput,
+    setIsbnInput,
+  ] = useState('');
 
   const [
     isSearchingIsbn,
@@ -521,26 +969,34 @@ export default function LibraryApp() {
   const [
     draggedIndex,
     setDraggedIndex,
-  ] = useState<number | null>(null);
+  ] = useState<number | null>(
+    null
+  );
 
 
   /* =======================================================
      FILTRI
   ======================================================= */
 
-  const [filterGenre, setFilterGenre] =
-    useState('all');
+  const [
+    filterGenre,
+    setFilterGenre,
+  ] = useState('all');
 
   const [
     filterFormat,
     setFilterFormat,
   ] = useState('all');
 
-  const [filterYear, setFilterYear] =
-    useState('all');
+  const [
+    filterYear,
+    setFilterYear,
+  ] = useState('all');
 
-  const [searchQuery, setSearchQuery] =
-    useState('');
+  const [
+    searchQuery,
+    setSearchQuery,
+  ] = useState('');
 
 
   /* =======================================================
@@ -549,18 +1005,20 @@ export default function LibraryApp() {
 
   const startYear = 2023;
 
-  const yearsList = Array.from(
-    {
-      length: Math.max(
-        1,
-        currentYearNum -
-          startYear +
-          1
-      ),
-    },
-    (_, i) =>
-      currentYearNum - i
-  );
+  const yearsList =
+    Array.from(
+      {
+        length:
+          Math.max(
+            1,
+            currentYearNum -
+              startYear +
+              1
+          ),
+      },
+      (_, i) =>
+        currentYearNum - i
+    );
 
 
   /* =======================================================
@@ -578,7 +1036,9 @@ export default function LibraryApp() {
         const parsed =
           JSON.parse(saved);
 
-        if (Array.isArray(parsed)) {
+        if (
+          Array.isArray(parsed)
+        ) {
           setBooks(parsed);
         }
       }
@@ -598,7 +1058,9 @@ export default function LibraryApp() {
   ======================================================= */
 
   useEffect(() => {
-    if (!isLoaded) return;
+    if (!isLoaded) {
+      return;
+    }
 
     try {
       localStorage.setItem(
@@ -611,41 +1073,47 @@ export default function LibraryApp() {
         error
       );
     }
-  }, [books, isLoaded]);
+  }, [
+    books,
+    isLoaded,
+  ]);
 
 
   /* =======================================================
      RESET FORM
   ======================================================= */
 
-  const resetForm = useCallback(() => {
-    setFormData({
-      title: '',
-      author: '',
-      publishCountry: '',
-      coverUrl: '',
-      publisher: '',
-      publishYear: '',
-      pages: undefined,
-      genre: '',
-      seriesTag: '',
-      volume: '',
-      isClassic: false,
-      format: 'cartaceo',
-      isRead: false,
-      readMonth: 'Gennaio',
-      readYear: currentYearNum,
-      rating: 5,
-      notes: '',
-      isbn: '',
-    });
+  const resetForm =
+    useCallback(() => {
+      setFormData({
+        title: '',
+        author: '',
+        publishCountry: '',
+        coverUrl: '',
+        publisher: '',
+        publishYear: '',
+        pages: undefined,
+        genre: '',
+        seriesTag: '',
+        volume: '',
+        isClassic: false,
+        format: 'cartaceo',
+        isRead: false,
+        readMonth: 'Gennaio',
+        readYear: currentYearNum,
+        rating: 5,
+        notes: '',
+        isbn: '',
+      });
 
-    setIsbnInput('');
-  }, [currentYearNum]);
+      setIsbnInput('');
+    }, [
+      currentYearNum,
+    ]);
 
 
   /* =======================================================
-     CERCA LIBRO VIA GOOGLE BOOKS
+     CERCA LIBRO
   ======================================================= */
 
   const handleSearchBookByISBN =
@@ -661,29 +1129,86 @@ export default function LibraryApp() {
           alert(
             'Inserisci un codice ISBN.'
           );
+
           return false;
         }
 
-        if (!isValidISBN(isbn)) {
+        if (
+          !isValidISBN(isbn)
+        ) {
           alert(
-            'Il codice inserito non sembra un ISBN valido.'
+            'Il codice inserito non è un ISBN valido.'
           );
+
           return false;
         }
 
         setIsSearchingIsbn(true);
 
+        setScannerStatus(
+          'Cerco il libro...'
+        );
+
         try {
-          const book =
+          /*
+           * ===============================================
+           * PRIMA FONTE:
+           * GOOGLE BOOKS
+           * ===============================================
+           */
+
+          let book =
             await searchGoogleBooksByISBN(
               isbn
             );
 
+          /*
+           * ===============================================
+           * SE GOOGLE NON TROVA:
+           * OPEN LIBRARY
+           * ===============================================
+           */
+
+          if (!book) {
+            setScannerStatus(
+              'Google Books non ha trovato l\'edizione. Cerco su Open Library...'
+            );
+
+            book =
+              await searchOpenLibraryByISBN(
+                isbn
+              );
+          }
+
+          /*
+           * ===============================================
+           * NESSUN RISULTATO
+           * ===============================================
+           */
+
           if (!book) {
             throw new Error(
-              'Nessun libro trovato su Google Books per questo ISBN.'
+              `Non ho trovato dati per ISBN ${isbn}.`
             );
           }
+
+          /*
+           * ===============================================
+           * COPERTINA DI RISERVA
+           * ===============================================
+           */
+
+          const finalCover =
+            book.coverUrl ||
+            getOpenLibraryCoverUrl(
+              book.isbn || isbn
+            );
+
+          /*
+           * ===============================================
+           * COMPILA FORM
+           * ===============================================
+           */
 
           setFormData(
             (previous) => ({
@@ -724,7 +1249,7 @@ export default function LibraryApp() {
                 '',
 
               coverUrl:
-                book.coverUrl ||
+                finalCover ||
                 previous.coverUrl ||
                 '',
             })
@@ -735,25 +1260,27 @@ export default function LibraryApp() {
           );
 
           setScannerStatus(
-            'Libro trovato su Google Books. Dati compilati automaticamente.'
+            'Libro trovato! Dati e copertina caricati.'
           );
 
           return true;
         } catch (error) {
           console.error(
-            'Errore ricerca Google Books:',
+            'Errore ricerca libro:',
             error
           );
 
           alert(
             error instanceof Error
               ? error.message
-              : 'Errore durante la ricerca su Google Books.'
+              : 'Errore durante la ricerca del libro.'
           );
 
           return false;
         } finally {
-          setIsSearchingIsbn(false);
+          setIsSearchingIsbn(
+            false
+          );
         }
       },
       [isbnInput]
@@ -778,29 +1305,35 @@ export default function LibraryApp() {
       scannerControlsRef.current =
         null;
 
+      scannerReaderRef.current =
+        null;
+
       scannerLockedRef.current =
         false;
 
       const video =
         scannerVideoRef.current;
 
-      if (video?.srcObject) {
+      if (
+        video?.srcObject
+      ) {
         const stream =
           video.srcObject as MediaStream;
 
         stream
           .getTracks()
-          .forEach((track) =>
-            track.stop()
+          .forEach(
+            (track) =>
+              track.stop()
           );
 
-        video.srcObject = null;
+        video.srcObject =
+          null;
       }
 
-      scannerReaderRef.current =
-        null;
-
-      setIsScannerOpen(false);
+      setIsScannerOpen(
+        false
+      );
     }, []);
 
 
@@ -822,7 +1355,14 @@ export default function LibraryApp() {
       try {
         if (
           typeof window ===
-            'undefined' ||
+            'undefined'
+        ) {
+          throw new Error(
+            'Browser non disponibile.'
+          );
+        }
+
+        if (
           !navigator.mediaDevices
             ?.getUserMedia
         ) {
@@ -831,26 +1371,31 @@ export default function LibraryApp() {
           );
         }
 
-        if (
-          !scannerVideoRef.current
-        ) {
+        const video =
+          scannerVideoRef.current;
+
+        if (!video) {
           throw new Error(
             'Elemento video non disponibile.'
           );
         }
 
-        const hints = new Map();
+        /*
+         * Per ISBN limitiamo la scansione
+         * ai formati EAN.
+         */
+
+        const hints =
+          new Map<
+            DecodeHintType,
+            unknown
+          >();
 
         hints.set(
           DecodeHintType.POSSIBLE_FORMATS,
           [
             BarcodeFormat.EAN_13,
             BarcodeFormat.EAN_8,
-            BarcodeFormat.UPC_A,
-            BarcodeFormat.UPC_E,
-            BarcodeFormat.CODE_128,
-            BarcodeFormat.ITF,
-            BarcodeFormat.QR_CODE,
           ]
         );
 
@@ -867,8 +1412,14 @@ export default function LibraryApp() {
         scannerReaderRef.current =
           reader;
 
-        const video =
-          scannerVideoRef.current;
+        /*
+         * IMPORTANTE:
+         * non usiamo controls.stop()
+         * dentro la callback.
+         *
+         * Usiamo il controllo fornito
+         * dalla callback stessa.
+         */
 
         const controls =
           await reader.decodeFromVideoDevice(
@@ -877,8 +1428,13 @@ export default function LibraryApp() {
             async (
               result,
               error,
-              controlsFromCallback
+              callbackControls
             ) => {
+              /*
+               * error è normale mentre
+               * la camera sta cercando.
+               */
+
               if (!result) {
                 return;
               }
@@ -896,69 +1452,114 @@ export default function LibraryApp() {
                 result.getText();
 
               const detectedISBN =
-                cleanISBN(rawText);
+                cleanISBN(
+                  rawText
+                );
 
               console.log(
                 'Codice rilevato:',
                 rawText
               );
 
-              setScannerStatus(
-                `Codice rilevato: ${detectedISBN}`
+              console.log(
+                'ISBN normalizzato:',
+                detectedISBN
               );
 
-              try {
-                controlsFromCallback.stop();
-              } catch {}
+              /*
+               * Fermiamo subito la decodifica.
+               */
 
               try {
-                controls.stop();
-              } catch {}
+                callbackControls.stop();
+              } catch (stopError) {
+                console.warn(
+                  'Errore arresto decoder:',
+                  stopError
+                );
+              }
 
               scannerControlsRef.current =
                 null;
 
-              if (video.srcObject) {
+              /*
+               * Fermiamo le tracce
+               * della fotocamera.
+               */
+
+              if (
+                video.srcObject
+              ) {
                 const stream =
                   video.srcObject as MediaStream;
 
                 stream
                   .getTracks()
-                  .forEach((track) =>
-                    track.stop()
+                  .forEach(
+                    (track) =>
+                      track.stop()
                   );
 
                 video.srcObject =
                   null;
               }
 
+              /*
+               * Verifica ISBN reale.
+               */
+
               if (
-                detectedISBN.length !==
-                  13 &&
-                detectedISBN.length !==
-                  10
+                !isValidISBN(
+                  detectedISBN
+                )
               ) {
                 scannerLockedRef.current =
                   false;
 
                 setScannerStatus(
-                  'Codice letto, ma non sembra un ISBN. Riprova.'
+                  `Codice letto (${detectedISBN}), ma non è un ISBN valido. Riprova.`
                 );
 
                 return;
               }
 
-              setIsScannerOpen(
-                false
+              /*
+               * Non chiudiamo subito
+               * lo scanner.
+               *
+               * Prima cerchiamo il libro.
+               */
+
+              setScannerStatus(
+                `ISBN ${detectedISBN} riconosciuto. Cerco il libro...`
               );
 
               setIsbnInput(
                 detectedISBN
               );
 
-              await handleSearchBookByISBN(
-                detectedISBN
-              );
+              const found =
+                await handleSearchBookByISBN(
+                  detectedISBN
+                );
+
+              if (found) {
+                setScannerStatus(
+                  'Libro trovato! Dati caricati.'
+                );
+
+                setIsScannerOpen(
+                  false
+                );
+              } else {
+                setScannerStatus(
+                  'Libro non trovato. Puoi inserire i dati manualmente.'
+                );
+
+                setIsScannerOpen(
+                  false
+                );
+              }
 
               scannerLockedRef.current =
                 false;
@@ -987,7 +1588,7 @@ export default function LibraryApp() {
             'NotAllowedError'
         ) {
           setScannerError(
-            'Accesso alla fotocamera negato. Vai in Impostazioni > Safari > Fotocamera e consenti l’accesso.'
+            'Accesso alla fotocamera negato. Consenti la fotocamera nelle impostazioni del browser.'
           );
         } else if (
           error instanceof
@@ -998,6 +1599,15 @@ export default function LibraryApp() {
           setScannerError(
             'Nessuna fotocamera disponibile.'
           );
+        } else if (
+          error instanceof
+            DOMException &&
+          error.name ===
+            'NotReadableError'
+        ) {
+          setScannerError(
+            'La fotocamera è già utilizzata da un’altra applicazione.'
+          );
         } else {
           setScannerError(
             error instanceof Error
@@ -1006,22 +1616,30 @@ export default function LibraryApp() {
           );
         }
       }
-    }, [handleSearchBookByISBN]);
+    }, [
+      handleSearchBookByISBN,
+    ]);
 
 
   /* =======================================================
      APRI SCANNER
   ======================================================= */
 
-  const openScanner = () => {
-    setScannerError('');
+  const openScanner =
+    () => {
+      setScannerError('');
 
-    setScannerStatus(
-      'Preparazione fotocamera...'
-    );
+      scannerLockedRef.current =
+        false;
 
-    setIsScannerOpen(true);
-  };
+      setScannerStatus(
+        'Preparazione fotocamera...'
+      );
+
+      setIsScannerOpen(
+        true
+      );
+    };
 
 
   /* =======================================================
@@ -1029,19 +1647,29 @@ export default function LibraryApp() {
   ======================================================= */
 
   useEffect(() => {
-    if (!isScannerOpen) {
+    if (
+      !isScannerOpen
+    ) {
       return;
     }
 
     const timer =
-      window.setTimeout(() => {
-        startScanner();
-      }, 150);
+      window.setTimeout(
+        () => {
+          startScanner();
+        },
+        250
+      );
 
     return () => {
-      window.clearTimeout(timer);
+      window.clearTimeout(
+        timer
+      );
     };
-  }, [isScannerOpen, startScanner]);
+  }, [
+    isScannerOpen,
+    startScanner,
+  ]);
 
 
   /* =======================================================
@@ -1057,14 +1685,17 @@ export default function LibraryApp() {
       const video =
         scannerVideoRef.current;
 
-      if (video?.srcObject) {
+      if (
+        video?.srcObject
+      ) {
         const stream =
           video.srcObject as MediaStream;
 
         stream
           .getTracks()
-          .forEach((track) =>
-            track.stop()
+          .forEach(
+            (track) =>
+              track.stop()
           );
       }
     };
@@ -1087,6 +1718,7 @@ export default function LibraryApp() {
       alert(
         'Inserisci almeno Titolo e Autore.'
       );
+
       return;
     }
 
@@ -1096,6 +1728,11 @@ export default function LibraryApp() {
       formData.readYear
         ? `${formData.readMonth} ${formData.readYear}`
         : '';
+
+    const cleanFormISBN =
+      cleanISBN(
+        formData.isbn || ''
+      );
 
     const newBook: BookItem = {
       id:
@@ -1114,7 +1751,13 @@ export default function LibraryApp() {
 
       coverUrl:
         formData.coverUrl ||
-        '',
+        (
+          cleanFormISBN
+            ? getOpenLibraryCoverUrl(
+                cleanFormISBN
+              )
+            : ''
+        ),
 
       publisher:
         formData.publisher ||
@@ -1170,33 +1813,42 @@ export default function LibraryApp() {
         '',
 
       isbn:
-        cleanISBN(
-          formData.isbn || ''
-        ),
+        cleanFormISBN,
 
       createdAt:
         formData.createdAt ||
         Date.now(),
     };
 
-    if (formData.id) {
-      setBooks((previous) =>
-        previous.map((book) =>
-          book.id === formData.id
-            ? newBook
-            : book
-        )
+    if (
+      formData.id
+    ) {
+      setBooks(
+        (previous) =>
+          previous.map(
+            (book) =>
+              book.id ===
+              formData.id
+                ? newBook
+                : book
+          )
       );
     } else {
-      setBooks((previous) => [
-        newBook,
-        ...previous,
-      ]);
+      setBooks(
+        (previous) => [
+          newBook,
+          ...previous,
+        ]
+      );
     }
 
-    setIsAddModalOpen(false);
+    setIsAddModalOpen(
+      false
+    );
 
-    setSelectedBookDetail(null);
+    setSelectedBookDetail(
+      null
+    );
 
     resetForm();
   };
@@ -1217,9 +1869,13 @@ export default function LibraryApp() {
       book.isbn || ''
     );
 
-    setSelectedBookDetail(null);
+    setSelectedBookDetail(
+      null
+    );
 
-    setIsAddModalOpen(true);
+    setIsAddModalOpen(
+      true
+    );
   };
 
 
@@ -1238,16 +1894,21 @@ export default function LibraryApp() {
       return;
     }
 
-    setBooks((previous) =>
-      previous.filter(
-        (book) => book.id !== id
-      )
+    setBooks(
+      (previous) =>
+        previous.filter(
+          (book) =>
+            book.id !== id
+        )
     );
 
     if (
-      selectedBookDetail?.id === id
+      selectedBookDetail?.id ===
+      id
     ) {
-      setSelectedBookDetail(null);
+      setSelectedBookDetail(
+        null
+      );
     }
   };
 
@@ -1279,7 +1940,8 @@ export default function LibraryApp() {
 
   const readBooks =
     books.filter(
-      (book) => book.isRead
+      (book) =>
+        book.isRead
     );
 
   const readBooksCount =
@@ -1304,22 +1966,24 @@ export default function LibraryApp() {
     ).length;
 
   const readThisYearBooks =
-    books.filter((book) => {
-      if (!book.isRead) {
-        return false;
-      }
+    books.filter(
+      (book) => {
+        if (!book.isRead) {
+          return false;
+        }
 
-      if (book.readYear) {
-        return (
-          book.readYear ===
-          currentYearNum
+        if (book.readYear) {
+          return (
+            book.readYear ===
+            currentYearNum
+          );
+        }
+
+        return !!book.readMonthYear?.includes(
+          currentYearNum.toString()
         );
       }
-
-      return !!book.readMonthYear?.includes(
-        currentYearNum.toString()
-      );
-    });
+    );
 
   const readThisYearCount =
     readThisYearBooks.length;
@@ -1352,7 +2016,8 @@ export default function LibraryApp() {
       new Set(
         books
           .map(
-            (book) => book.genre
+            (book) =>
+              book.genre
           )
           .filter(Boolean)
       )
@@ -1362,20 +2027,24 @@ export default function LibraryApp() {
     Array.from(
       new Set(
         books
-          .map((book) => {
-            if (book.readYear) {
-              return book.readYear.toString();
+          .map(
+            (book) => {
+              if (
+                book.readYear
+              ) {
+                return book.readYear.toString();
+              }
+
+              const match =
+                book.readMonthYear?.match(
+                  /\d{4}/
+                );
+
+              return match
+                ? match[0]
+                : null;
             }
-
-            const match =
-              book.readMonthYear?.match(
-                /\d{4}/
-              );
-
-            return match
-              ? match[0]
-              : null;
-          })
+          )
           .filter(Boolean)
       )
     );
@@ -1383,78 +2052,102 @@ export default function LibraryApp() {
   const readBooksFiltered =
     books
       .filter(
-        (book) => book.isRead
+        (book) =>
+          book.isRead
       )
-      .filter((book) =>
-        filterGenre === 'all'
-          ? true
-          : book.genre ===
-            filterGenre
-      )
-      .filter((book) => {
-        if (
-          filterFormat ===
+      .filter(
+        (book) =>
+          filterGenre ===
           'all'
-        ) {
-          return true;
-        }
+            ? true
+            : book.genre ===
+              filterGenre
+      )
+      .filter(
+        (book) => {
+          if (
+            filterFormat ===
+            'all'
+          ) {
+            return true;
+          }
 
-        if (
-          filterFormat ===
-          'cartaceo'
-        ) {
-          return (
-            book.format ===
+          if (
+            filterFormat ===
             'cartaceo'
-          );
-        }
+          ) {
+            return (
+              book.format ===
+              'cartaceo'
+            );
+          }
 
-        if (
-          filterFormat ===
-          'ebook'
-        ) {
+          if (
+            filterFormat ===
+            'ebook'
+          ) {
+            return (
+              book.format ===
+                'ebook' ||
+              book.format ===
+                'ebook_and_paper'
+            );
+          }
+
+          return true;
+        }
+      )
+      .filter(
+        (book) => {
+          if (
+            filterYear ===
+            'all'
+          ) {
+            return true;
+          }
+
           return (
-            book.format ===
-              'ebook' ||
-            book.format ===
-              'ebook_and_paper'
+            book.readYear
+              ?.toString() ===
+              filterYear ||
+            book.readMonthYear?.includes(
+              filterYear
+            )
           );
         }
+      )
+      .filter(
+        (book) => {
+          if (
+            !searchQuery.trim()
+          ) {
+            return true;
+          }
 
-        return true;
-      })
-      .filter((book) => {
-        if (
-          filterYear === 'all'
-        ) {
-          return true;
+          const query =
+            searchQuery
+              .toLowerCase()
+              .trim();
+
+          return (
+            book.title
+              .toLowerCase()
+              .includes(
+                query
+              ) ||
+            book.author
+              .toLowerCase()
+              .includes(
+                query
+              ) ||
+            book.isbn
+              ?.toLowerCase()
+              .includes(
+                query
+              )
+          );
         }
-
-        return (
-          book.readYear?.toString() ===
-            filterYear ||
-          book.readMonthYear?.includes(
-            filterYear
-          )
-        );
-      })
-      .filter((book) => {
-        if (!searchQuery) {
-          return true;
-        }
-
-        const query =
-          searchQuery.toLowerCase();
-
-        return (
-          book.title
-            .toLowerCase()
-            .includes(query) ||
-          book.author
-            .toLowerCase()
-            .includes(query)
-        );
-      });
+      );
 
 
   /* =======================================================
@@ -1472,15 +2165,18 @@ export default function LibraryApp() {
           'Autore Sconosciuto';
 
         if (
-          !accumulator[author]
+          !accumulator[
+            author
+          ]
         ) {
-          accumulator[author] =
-            [];
+          accumulator[
+            author
+          ] = [];
         }
 
-        accumulator[author].push(
-          book
-        );
+        accumulator[
+          author
+        ].push(book);
 
         return accumulator;
       },
@@ -1493,8 +2189,9 @@ export default function LibraryApp() {
   const sortedAuthors =
     Object.keys(
       authorsMap
-    ).sort((a, b) =>
-      a.localeCompare(b)
+    ).sort(
+      (a, b) =>
+        a.localeCompare(b)
     );
 
 
@@ -1513,15 +2210,18 @@ export default function LibraryApp() {
           'Generico / Altro';
 
         if (
-          !accumulator[genre]
+          !accumulator[
+            genre
+          ]
         ) {
-          accumulator[genre] =
-            [];
+          accumulator[
+            genre
+          ] = [];
         }
 
-        accumulator[genre].push(
-          book
-        );
+        accumulator[
+          genre
+        ].push(book);
 
         return accumulator;
       },
@@ -1534,8 +2234,9 @@ export default function LibraryApp() {
   const sortedGenres =
     Object.keys(
       genresMap
-    ).sort((a, b) =>
-      a.localeCompare(b)
+    ).sort(
+      (a, b) =>
+        a.localeCompare(b)
     );
 
 
@@ -1546,7 +2247,9 @@ export default function LibraryApp() {
   const handleDragStart = (
     index: number
   ) => {
-    setDraggedIndex(index);
+    setDraggedIndex(
+      index
+    );
   };
 
   const handleDragOver = (
@@ -1564,7 +2267,8 @@ export default function LibraryApp() {
 
     const readOnlyBooks =
       books.filter(
-        (book) => book.isRead
+        (book) =>
+          book.isRead
       );
 
     const itemToMove =
@@ -1573,7 +2277,9 @@ export default function LibraryApp() {
       ];
 
     const targetBook =
-      readOnlyBooks[index];
+      readOnlyBooks[
+        index
+      ];
 
     if (
       !itemToMove ||
@@ -1618,13 +2324,21 @@ export default function LibraryApp() {
       itemToMove
     );
 
-    setDraggedIndex(index);
-    setBooks(updated);
+    setDraggedIndex(
+      index
+    );
+
+    setBooks(
+      updated
+    );
   };
 
-  const handleDragEnd = () => {
-    setDraggedIndex(null);
-  };
+  const handleDragEnd =
+    () => {
+      setDraggedIndex(
+        null
+      );
+    };
 
 
   /* =======================================================
@@ -1635,13 +2349,15 @@ export default function LibraryApp() {
     format: string
   ) => {
     if (
-      format === 'cartaceo'
+      format ===
+      'cartaceo'
     ) {
       return 'Cartaceo';
     }
 
     if (
-      format === 'ebook'
+      format ===
+      'ebook'
     ) {
       return 'eBook';
     }
@@ -1658,7 +2374,7 @@ export default function LibraryApp() {
 
 
   /* =======================================================
-     AUTORE / LIBRI
+     GRUPPO AUTORE
   ======================================================= */
 
   const renderAuthorGroup = (
@@ -1675,15 +2391,18 @@ export default function LibraryApp() {
             'Autore Sconosciuto';
 
           if (
-            !accumulator[author]
+            !accumulator[
+              author
+            ]
           ) {
-            accumulator[author] =
-              [];
+            accumulator[
+              author
+            ] = [];
           }
 
-          accumulator[author].push(
-            book
-          );
+          accumulator[
+            author
+          ].push(book);
 
           return accumulator;
         },
@@ -1697,83 +2416,86 @@ export default function LibraryApp() {
       map
     )
       .sort()
-      .map((author) => (
-        <div
-          key={author}
-          className="space-y-2 pt-2"
-        >
-          <h3 className="font-serif font-bold text-sm text-amber-950 border-b border-amber-900/10 pb-1">
-            {author}
-          </h3>
+      .map(
+        (author) => (
+          <div
+            key={author}
+            className="space-y-2 pt-2"
+          >
+            <h3 className="font-serif font-bold text-sm text-amber-950 border-b border-amber-900/10 pb-1">
+              {author}
+            </h3>
 
-          <div className="grid grid-cols-2 gap-3">
-            {map[author]
-              .sort((a, b) =>
-                (
-                  a.volume || ''
-                ).localeCompare(
-                  b.volume || ''
-                )
-              )
-              .map((book) => (
-                <div
-                  key={book.id}
-                  onClick={() =>
-                    setSelectedBookDetail(
-                      book
+            <div className="grid grid-cols-2 gap-3">
+              {map[author]
+                .sort(
+                  (a, b) =>
+                    (
+                      a.volume ||
+                      ''
+                    ).localeCompare(
+                      b.volume ||
+                        ''
                     )
-                  }
-                  className="bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex flex-col cursor-pointer"
-                >
-                  <div className="w-full h-36 bg-amber-100/40 rounded-xl overflow-hidden relative mb-2 border border-amber-900/10">
-                    {book.coverUrl ? (
-                      <img
-                        src={
-                          book.coverUrl
-                        }
-                        alt={
+                )
+                .map(
+                  (book) => (
+                    <div
+                      key={
+                        book.id
+                      }
+                      onClick={() =>
+                        setSelectedBookDetail(
+                          book
+                        )
+                      }
+                      className="bg-[#FFFDF9] p-3 rounded-2xl shadow-sm border border-amber-900/10 flex flex-col cursor-pointer"
+                    >
+                      <div className="w-full h-36 bg-amber-100/40 rounded-xl overflow-hidden relative mb-2 border border-amber-900/10">
+                        <BookCover
+                          src={
+                            book.coverUrl
+                          }
+                          title={
+                            book.title
+                          }
+                          className="w-full h-full object-cover"
+                        />
+
+                        {book.isRead && (
+                          <div className="absolute top-2 right-2 bg-emerald-700 text-amber-50 p-1 rounded-full shadow">
+                            <CheckCircle2 className="w-3 h-3" />
+                          </div>
+                        )}
+
+                        {book.volume && (
+                          <div className="absolute top-2 left-2 bg-amber-800 text-amber-50 text-[9px] font-bold px-2 py-0.5 rounded-full">
+                            Vol.{' '}
+                            {
+                              book.volume
+                            }
+                          </div>
+                        )}
+                      </div>
+
+                      <h4 className="font-serif font-bold text-xs text-amber-950 line-clamp-2">
+                        {
                           book.title
                         }
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-amber-800/30">
-                        <Book className="w-6 h-6" />
-                      </div>
-                    )}
+                      </h4>
 
-                    {book.isRead && (
-                      <div className="absolute top-2 right-2 bg-emerald-700 text-amber-50 p-1 rounded-full shadow">
-                        <CheckCircle2 className="w-3 h-3" />
-                      </div>
-                    )}
-
-                    {book.volume && (
-                      <div className="absolute top-2 left-2 bg-amber-800 text-amber-50 text-[9px] font-bold px-2 py-0.5 rounded-full">
-                        Vol.{' '}
-                        {
-                          book.volume
-                        }
-                      </div>
-                    )}
-                  </div>
-
-                  <h4 className="font-serif font-bold text-xs text-amber-950 line-clamp-2">
-                    {
-                      book.title
-                    }
-                  </h4>
-
-                  <p className="text-[10px] text-amber-800/60 mt-0.5">
-                    {book.publishYear
-                      ? `Anno: ${book.publishYear}`
-                      : ''}
-                  </p>
-                </div>
-              ))}
+                      <p className="text-[10px] text-amber-800/60 mt-0.5">
+                        {book.publishYear
+                          ? `Anno: ${book.publishYear}`
+                          : ''}
+                      </p>
+                    </div>
+                  )
+                )}
+            </div>
           </div>
-        </div>
-      ));
+        )
+      );
   };
 
 
@@ -1781,175 +2503,198 @@ export default function LibraryApp() {
      EXPORT EXCEL
   ======================================================= */
 
-  const exportToExcel = () => {
-    const data =
-      books.map(
-        (book) => ({
-          Titolo:
-            book.title,
-          Autore:
-            book.author,
-          'Paese di Pubblicazione':
-            book.publishCountry ||
-            '-',
-          Classico:
-            book.isClassic
-              ? 'Sì'
-              : 'No',
-          Stato:
-            book.isRead
-              ? 'Letto'
-              : 'In Biblioteca',
-          Formato:
-            formatLabel(
-              book.format
-            ),
-          Editore:
-            book.publisher ||
-            '',
-          'Anno Pubblicazione':
-            book.publishYear ||
-            '',
-          Genere:
-            book.genre ||
-            '',
-          'Serie / Tag':
-            book.seriesTag ||
-            '',
-          Volume:
-            book.volume ||
-            '',
-          Pagine:
-            book.pages ||
-            '',
-          'Mese e Anno di Lettura':
-            book.readMonthYear ||
-            '',
-          ISBN:
-            book.isbn ||
-            '',
-        })
+  const exportToExcel =
+    () => {
+      const data =
+        books.map(
+          (book) => ({
+            Titolo:
+              book.title,
+
+            Autore:
+              book.author,
+
+            'Paese di Pubblicazione':
+              book.publishCountry ||
+              '-',
+
+            Classico:
+              book.isClassic
+                ? 'Sì'
+                : 'No',
+
+            Stato:
+              book.isRead
+                ? 'Letto'
+                : 'In Biblioteca',
+
+            Formato:
+              formatLabel(
+                book.format
+              ),
+
+            Editore:
+              book.publisher ||
+              '',
+
+            'Anno Pubblicazione':
+              book.publishYear ||
+              '',
+
+            Genere:
+              book.genre ||
+              '',
+
+            'Serie / Tag':
+              book.seriesTag ||
+              '',
+
+            Volume:
+              book.volume ||
+              '',
+
+            Pagine:
+              book.pages ||
+              '',
+
+            'Mese e Anno di Lettura':
+              book.readMonthYear ||
+              '',
+
+            ISBN:
+              book.isbn ||
+              '',
+          })
+        );
+
+      const worksheet =
+        XLSX.utils.json_to_sheet(
+          data
+        );
+
+      const workbook =
+        XLSX.utils.book_new();
+
+      XLSX.utils.book_append_sheet(
+        workbook,
+        worksheet,
+        'Biblioteca'
       );
 
-    const worksheet =
-      XLSX.utils.json_to_sheet(
-        data
+      XLSX.writeFile(
+        workbook,
+        'La_Mia_Biblioteca.xlsx'
       );
-
-    const workbook =
-      XLSX.utils.book_new();
-
-    XLSX.utils.book_append_sheet(
-      workbook,
-      worksheet,
-      'Biblioteca'
-    );
-
-    XLSX.writeFile(
-      workbook,
-      'La_Mia_Biblioteca.xlsx'
-    );
-  };
+    };
 
 
   /* =======================================================
      EXPORT PDF
   ======================================================= */
 
-  const exportToPDF = () => {
-    const doc =
-      new jsPDF();
+  const exportToPDF =
+    () => {
+      const doc =
+        new jsPDF();
 
-    doc.text(
-      'La Mia Biblioteca - Report',
-      14,
-      15
-    );
-
-    const tableData =
-      books.map(
-        (book) => [
-          book.title,
-          book.author,
-          book.publishCountry ||
-            '-',
-          book.isClassic
-            ? 'Sì'
-            : 'No',
-          book.isRead
-            ? 'Letto'
-            : 'In Libreria',
-          formatLabel(
-            book.format
-          ),
-          book.genre ||
-            '-',
-          book.readMonthYear ||
-            '-',
-        ]
+      doc.text(
+        'La Mia Biblioteca - Report',
+        14,
+        15
       );
 
-    autoTable(doc, {
-      head: [
-        [
-          'Titolo',
-          'Autore',
-          'Paese',
-          'Classico',
-          'Stato',
-          'Formato',
-          'Genere',
-          'Data Lettura',
-        ],
-      ],
-      body: tableData,
-      startY: 20,
-    });
+      const tableData =
+        books.map(
+          (book) => [
+            book.title,
+            book.author,
+            book.publishCountry ||
+              '-',
+            book.isClassic
+              ? 'Sì'
+              : 'No',
+            book.isRead
+              ? 'Letto'
+              : 'In Libreria',
+            formatLabel(
+              book.format
+            ),
+            book.genre ||
+              '-',
+            book.readMonthYear ||
+              '-',
+          ]
+        );
 
-    doc.save(
-      'La_Mia_Biblioteca.pdf'
-    );
-  };
+      autoTable(
+        doc,
+        {
+          head: [
+            [
+              'Titolo',
+              'Autore',
+              'Paese',
+              'Classico',
+              'Stato',
+              'Formato',
+              'Genere',
+              'Data Lettura',
+            ],
+          ],
+
+          body:
+            tableData,
+
+          startY:
+            20,
+        }
+      );
+
+      doc.save(
+        'La_Mia_Biblioteca.pdf'
+      );
+    };
 
 
   /* =======================================================
      BACKUP
   ======================================================= */
 
-  const exportBackup = () => {
-    const dataStr =
-      'data:text/json;charset=utf-8,' +
-      encodeURIComponent(
-        JSON.stringify(
-          books,
-          null,
-          2
-        )
+  const exportBackup =
+    () => {
+      const dataStr =
+        'data:text/json;charset=utf-8,' +
+        encodeURIComponent(
+          JSON.stringify(
+            books,
+            null,
+            2
+          )
+        );
+
+      const anchor =
+        document.createElement(
+          'a'
+        );
+
+      anchor.setAttribute(
+        'href',
+        dataStr
       );
 
-    const anchor =
-      document.createElement(
-        'a'
+      anchor.setAttribute(
+        'download',
+        'backup_libreria.json'
       );
 
-    anchor.setAttribute(
-      'href',
-      dataStr
-    );
+      document.body.appendChild(
+        anchor
+      );
 
-    anchor.setAttribute(
-      'download',
-      'backup_libreria.json'
-    );
+      anchor.click();
 
-    document.body.appendChild(
-      anchor
-    );
-
-    anchor.click();
-
-    anchor.remove();
-  };
+      anchor.remove();
+    };
 
 
   /* =======================================================
@@ -1962,51 +2707,57 @@ export default function LibraryApp() {
     const file =
       event.target.files?.[0];
 
-    if (!file) return;
+    if (!file) {
+      return;
+    }
 
     const reader =
       new FileReader();
 
-    reader.onload = (
-      loadEvent
-    ) => {
-      try {
-        const parsed =
-          JSON.parse(
-            loadEvent.target
-              ?.result as string
+    reader.onload =
+      (loadEvent) => {
+        try {
+          const parsed =
+            JSON.parse(
+              loadEvent.target
+                ?.result as string
+            );
+
+          if (
+            !Array.isArray(
+              parsed
+            )
+          ) {
+            throw new Error(
+              'Formato non valido'
+            );
+          }
+
+          setBooks(
+            parsed
           );
 
-        if (
-          !Array.isArray(
-            parsed
-          )
-        ) {
-          throw new Error(
-            'Formato non valido'
+          alert(
+            'Backup ripristinato con successo!'
+          );
+        } catch (error) {
+          console.error(
+            error
+          );
+
+          alert(
+            'File di backup non valido.'
           );
         }
-
-        setBooks(parsed);
-
-        alert(
-          'Backup ripristinato con successo!'
-        );
-      } catch (error) {
-        console.error(error);
-
-        alert(
-          'File di backup non valido.'
-        );
-      }
-    };
+      };
 
     reader.readAsText(
       file,
       'UTF-8'
     );
 
-    event.target.value = '';
+    event.target.value =
+      '';
   };
 
 
@@ -2014,21 +2765,22 @@ export default function LibraryApp() {
      CLEAR
   ======================================================= */
 
-  const handleClearAll = () => {
-    if (
-      !confirm(
-        'ATTENZIONE: verranno cancellati TUTTI i libri. Procedere?'
-      )
-    ) {
-      return;
-    }
+  const handleClearAll =
+    () => {
+      if (
+        !confirm(
+          'ATTENZIONE: verranno cancellati TUTTI i libri. Procedere?'
+        )
+      ) {
+        return;
+      }
 
-    setBooks([]);
+      setBooks([]);
 
-    localStorage.removeItem(
-      STORAGE_KEY
-    );
-  };
+      localStorage.removeItem(
+        STORAGE_KEY
+      );
+    };
 
 
   /* =======================================================
@@ -2046,29 +2798,38 @@ export default function LibraryApp() {
 
         <div>
           <span className="text-[11px] font-bold text-amber-800/70 uppercase tracking-widest block">
-            {activeTab === 'home' &&
+            {activeTab ===
+              'home' &&
               'La Mia Collezione'}
 
-            {activeTab === 'read' &&
+            {activeTab ===
+              'read' &&
               'Cronologia Letture'}
 
-            {activeTab === 'authors' &&
+            {activeTab ===
+              'authors' &&
               'Catalogo Autori'}
 
-            {activeTab === 'settings' &&
+            {activeTab ===
+              'settings' &&
               'Gestione Dati'}
           </span>
 
           <h1 className="text-2xl font-serif font-extrabold tracking-tight text-amber-950">
-            {activeTab === 'home' &&
+            {activeTab ===
+              'home' &&
               'Home'}
 
-            {activeTab === 'read' &&
+            {activeTab ===
+              'read' &&
               'Libri Letti'}
 
-            {activeTab === 'authors' &&
-              (selectedAuthor ||
-                'Autori')}
+            {activeTab ===
+              'authors' &&
+              (
+                selectedAuthor ||
+                'Autori'
+              )}
 
             {activeTab ===
               'settings' &&
@@ -2076,10 +2837,12 @@ export default function LibraryApp() {
           </h1>
         </div>
 
-        {activeTab === 'read' && (
+        {activeTab ===
+          'read' && (
           <button
             onClick={() => {
               resetForm();
+
               setIsAddModalOpen(
                 true
               );
@@ -2096,7 +2859,8 @@ export default function LibraryApp() {
           HOME
       ================================================= */}
 
-      {activeTab === 'home' && (
+      {activeTab ===
+        'home' && (
         <div className="p-4 space-y-5 max-w-lg mx-auto">
 
           {homeSubView !==
@@ -2108,6 +2872,7 @@ export default function LibraryApp() {
                   setHomeSubView(
                     'none'
                   );
+
                   setSelectedGenreHome(
                     null
                   );
@@ -2131,7 +2896,9 @@ export default function LibraryApp() {
 
                   {renderAuthorGroup(
                     books.filter(
-                      (book) =>
+                      (
+                        book
+                      ) =>
                         book.isClassic
                     )
                   )}
@@ -2150,41 +2917,49 @@ export default function LibraryApp() {
                         Biblioteca
                       </h2>
 
-                      {sortedGenres.map(
-                        (
-                          genre
-                        ) => (
-                          <div
-                            key={
-                              genre
-                            }
-                            onClick={() =>
-                              setSelectedGenreHome(
+                      {sortedGenres.length ===
+                      0 ? (
+                        <div className="text-center py-8 text-xs text-amber-800/60">
+                          Nessun genere
+                          disponibile.
+                        </div>
+                      ) : (
+                        sortedGenres.map(
+                          (
+                            genre
+                          ) => (
+                            <div
+                              key={
                                 genre
-                              )
-                            }
-                            className="bg-[#FFFDF9] p-4 rounded-2xl shadow-sm border border-amber-900/10 flex justify-between items-center cursor-pointer"
-                          >
-                            <div>
-                              <h3 className="font-serif font-bold">
-                                {
+                              }
+                              onClick={() =>
+                                setSelectedGenreHome(
                                   genre
-                                }
-                              </h3>
-
-                              <p className="text-xs text-amber-800/60">
-                                {
-                                  genresMap[
+                                )
+                              }
+                              className="bg-[#FFFDF9] p-4 rounded-2xl shadow-sm border border-amber-900/10 flex justify-between items-center cursor-pointer"
+                            >
+                              <div>
+                                <h3 className="font-serif font-bold">
+                                  {
                                     genre
-                                  ]
-                                    .length
-                                }{' '}
-                                libri
-                              </p>
-                            </div>
+                                  }
+                                </h3>
 
-                            <ChevronRight className="w-5 h-5 text-amber-800/30" />
-                          </div>
+                                <p className="text-xs text-amber-800/60">
+                                  {
+                                    genresMap[
+                                      genre
+                                    ]
+                                      .length
+                                  }{' '}
+                                  libri
+                                </p>
+                              </div>
+
+                              <ChevronRight className="w-5 h-5 text-amber-800/30" />
+                            </div>
+                          )
                         )
                       )}
                     </div>
@@ -2343,7 +3118,9 @@ export default function LibraryApp() {
                       <span className="text-xs text-amber-200/80">
                         {
                           books.filter(
-                            (book) =>
+                            (
+                              book
+                            ) =>
                               book.isClassic
                           ).length
                         }{' '}
@@ -2389,7 +3166,8 @@ export default function LibraryApp() {
           LETTI
       ================================================= */}
 
-      {activeTab === 'read' && (
+      {activeTab ===
+        'read' && (
         <div className="p-4 space-y-4 max-w-lg mx-auto">
 
           <div className="relative">
@@ -2401,7 +3179,9 @@ export default function LibraryApp() {
               value={
                 searchQuery
               }
-              onChange={(event) =>
+              onChange={(
+                event
+              ) =>
                 setSearchQuery(
                   event.target.value
                 )
@@ -2417,7 +3197,9 @@ export default function LibraryApp() {
               value={
                 filterGenre
               }
-              onChange={(event) =>
+              onChange={(
+                event
+              ) =>
                 setFilterGenre(
                   event.target.value
                 )
@@ -2429,7 +3211,9 @@ export default function LibraryApp() {
               </option>
 
               {availableGenres.map(
-                (genre) => (
+                (
+                  genre
+                ) => (
                   <option
                     key={
                       genre
@@ -2451,7 +3235,9 @@ export default function LibraryApp() {
               value={
                 filterFormat
               }
-              onChange={(event) =>
+              onChange={(
+                event
+              ) =>
                 setFilterFormat(
                   event.target.value
                 )
@@ -2476,7 +3262,9 @@ export default function LibraryApp() {
               value={
                 filterYear
               }
-              onChange={(event) =>
+              onChange={(
+                event
+              ) =>
                 setFilterYear(
                   event.target.value
                 )
@@ -2488,7 +3276,9 @@ export default function LibraryApp() {
               </option>
 
               {availableYears.map(
-                (year) => (
+                (
+                  year
+                ) => (
                   <option
                     key={
                       year
@@ -2570,21 +3360,15 @@ export default function LibraryApp() {
                       }
                       className="w-13 h-19 bg-amber-100/40 rounded-lg overflow-hidden flex-shrink-0 cursor-pointer"
                     >
-                      {book.coverUrl ? (
-                        <img
-                          src={
-                            book.coverUrl
-                          }
-                          alt={
-                            book.title
-                          }
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center">
-                          <Book className="w-5 h-5" />
-                        </div>
-                      )}
+                      <BookCover
+                        src={
+                          book.coverUrl
+                        }
+                        title={
+                          book.title
+                        }
+                        className="w-full h-full object-cover"
+                      />
                     </div>
 
 
@@ -2660,7 +3444,8 @@ export default function LibraryApp() {
           AUTORI
       ================================================= */}
 
-      {activeTab === 'authors' && (
+      {activeTab ===
+        'authors' && (
         <div className="p-4 max-w-lg mx-auto">
 
           {!selectedAuthor ? (
@@ -2678,7 +3463,9 @@ export default function LibraryApp() {
                 </div>
               ) : (
                 sortedAuthors.map(
-                  (author) => (
+                  (
+                    author
+                  ) => (
                     <div
                       key={
                         author
@@ -2738,7 +3525,9 @@ export default function LibraryApp() {
                 {authorsMap[
                   selectedAuthor
                 ]?.map(
-                  (book) => (
+                  (
+                    book
+                  ) => (
                     <div
                       key={
                         book.id
@@ -2752,22 +3541,15 @@ export default function LibraryApp() {
                     >
 
                       <div className="w-full h-44 bg-amber-100/40 rounded-xl overflow-hidden mb-2">
-
-                        {book.coverUrl ? (
-                          <img
-                            src={
-                              book.coverUrl
-                            }
-                            alt={
-                              book.title
-                            }
-                            className="w-full h-full object-cover"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center">
-                            <Book />
-                          </div>
-                        )}
+                        <BookCover
+                          src={
+                            book.coverUrl
+                          }
+                          title={
+                            book.title
+                          }
+                          className="w-full h-full object-cover"
+                        />
                       </div>
 
                       <h4 className="font-serif font-bold text-xs">
@@ -2795,7 +3577,8 @@ export default function LibraryApp() {
           SETTINGS
       ================================================= */}
 
-      {activeTab === 'settings' && (
+      {activeTab ===
+        'settings' && (
         <div className="p-4 space-y-5 max-w-lg mx-auto">
 
           <div className="bg-[#FFFDF9] rounded-3xl p-4 border border-amber-900/10 space-y-3">
@@ -2905,22 +3688,15 @@ export default function LibraryApp() {
             <div className="flex gap-4">
 
               <div className="w-24 h-36 bg-amber-100 rounded-xl overflow-hidden flex-shrink-0">
-
-                {selectedBookDetail.coverUrl ? (
-                  <img
-                    src={
-                      selectedBookDetail.coverUrl
-                    }
-                    alt={
-                      selectedBookDetail.title
-                    }
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center">
-                    <Book />
-                  </div>
-                )}
+                <BookCover
+                  src={
+                    selectedBookDetail.coverUrl
+                  }
+                  title={
+                    selectedBookDetail.title
+                  }
+                  className="w-full h-full object-cover"
+                />
               </div>
 
 
@@ -3123,7 +3899,7 @@ export default function LibraryApp() {
 
 
             {/* ===========================================
-                SCANNER
+                SCANNER ISBN
             =========================================== */}
 
             <div className="bg-amber-100/50 p-4 rounded-2xl border border-amber-900/10 space-y-3">
@@ -3136,9 +3912,9 @@ export default function LibraryApp() {
                   </span>
 
                   <p className="text-[10px] text-amber-800/60 mt-1">
-                    Usa la fotocamera
-                    posteriore del
-                    dispositivo.
+                    Inquadra il codice
+                    a barre sul retro
+                    del libro.
                   </p>
                 </div>
 
@@ -3180,8 +3956,7 @@ export default function LibraryApp() {
                     event
                   ) => {
                     const value =
-                      event.target
-                        .value;
+                      event.target.value;
 
                     setIsbnInput(
                       value
@@ -3192,9 +3967,11 @@ export default function LibraryApp() {
                         previous
                       ) => ({
                         ...previous,
-                        isbn: cleanISBN(
-                          value
-                        ),
+
+                        isbn:
+                          cleanISBN(
+                            value
+                          ),
                       })
                     );
                   }}
@@ -3298,8 +4075,7 @@ export default function LibraryApp() {
                       {
                         ...formData,
                         publishCountry:
-                          event
-                            .target
+                          event.target
                             .value,
                       }
                     )
@@ -3348,8 +4124,7 @@ export default function LibraryApp() {
                       {
                         ...formData,
                         publisher:
-                          event
-                            .target
+                          event.target
                             .value,
                       }
                     )
@@ -3371,8 +4146,7 @@ export default function LibraryApp() {
                       {
                         ...formData,
                         publishYear:
-                          event
-                            .target
+                          event.target
                             .value,
                       }
                     )
@@ -3398,8 +4172,7 @@ export default function LibraryApp() {
                       {
                         ...formData,
                         genre:
-                          event
-                            .target
+                          event.target
                             .value,
                       }
                     )
@@ -3426,12 +4199,14 @@ export default function LibraryApp() {
 
                     setFormData({
                       ...formData,
-                      pages: value
-                        ? parseInt(
-                            value,
-                            10
-                          )
-                        : undefined,
+
+                      pages:
+                        value
+                          ? parseInt(
+                              value,
+                              10
+                            )
+                          : undefined,
                     });
                   }}
                   className="p-3 bg-[#FFFDF9] border border-amber-900/10 rounded-xl"
@@ -3455,8 +4230,7 @@ export default function LibraryApp() {
                       {
                         ...formData,
                         seriesTag:
-                          event
-                            .target
+                          event.target
                             .value,
                       }
                     )
@@ -3478,8 +4252,7 @@ export default function LibraryApp() {
                       {
                         ...formData,
                         volume:
-                          event
-                            .target
+                          event.target
                             .value,
                       }
                     )
@@ -3510,8 +4283,7 @@ export default function LibraryApp() {
                       {
                         ...formData,
                         isClassic:
-                          event
-                            .target
+                          event.target
                             .checked,
                       }
                     )
@@ -3594,8 +4366,7 @@ export default function LibraryApp() {
                           {
                             ...formData,
                             format:
-                              event
-                                .target
+                              event.target
                                 .checked
                                 ? 'ebook_and_paper'
                                 : 'ebook',
@@ -3632,8 +4403,7 @@ export default function LibraryApp() {
                       {
                         ...formData,
                         isRead:
-                          event
-                            .target
+                          event.target
                             .checked,
                       }
                     )
@@ -3840,8 +4610,8 @@ export default function LibraryApp() {
             <p className="text-[11px] text-white/60">
               Suggerimento: usa la
               fotocamera posteriore e
-              avvicinati lentamente al
-              codice a barre.
+              inquadra il codice a barre
+              EAN sul retro del libro.
             </p>
 
             {scannerError && (
@@ -3850,6 +4620,10 @@ export default function LibraryApp() {
                   setScannerError(
                     ''
                   );
+
+                  scannerLockedRef.current =
+                    false;
+
                   startScanner();
                 }}
                 className="mt-3 px-5 py-2.5 bg-white text-black rounded-xl text-xs font-bold"
@@ -3873,15 +4647,18 @@ export default function LibraryApp() {
             setActiveTab(
               'home'
             );
+
             setSelectedAuthor(
               null
             );
+
             setHomeSubView(
               'none'
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab === 'home'
+            activeTab ===
+            'home'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
@@ -3899,12 +4676,14 @@ export default function LibraryApp() {
             setActiveTab(
               'read'
             );
+
             setSelectedAuthor(
               null
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab === 'read'
+            activeTab ===
+            'read'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
@@ -3922,12 +4701,14 @@ export default function LibraryApp() {
             setActiveTab(
               'authors'
             );
+
             setSelectedAuthor(
               null
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab === 'authors'
+            activeTab ===
+            'authors'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
@@ -3945,12 +4726,14 @@ export default function LibraryApp() {
             setActiveTab(
               'settings'
             );
+
             setSelectedAuthor(
               null
             );
           }}
           className={`flex flex-col items-center gap-1 ${
-            activeTab === 'settings'
+            activeTab ===
+            'settings'
               ? 'text-amber-800'
               : 'text-amber-900/40'
           }`}
